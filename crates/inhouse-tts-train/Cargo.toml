@@ -1,0 +1,30 @@
+[package]
+name = "inhouse-tts-train"
+description = "Training of Inhouse TTS's own models in Rust (burn): data loading, model, losses, GAN training, export to .ihw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ihtts-train"
+path = "src/main.rs"
+
+[features]
+default = []
+# NVIDIA GPUs through CubeCL (pure-Rust kernels compiled with NVRTC at run time).
+cuda = ["burn/cuda"]
+# Vulkan / Metal / DX12 GPUs through wgpu.
+wgpu = ["burn/wgpu"]
+
+[dependencies]
+burn = { version = "=0.22.1", default-features = false, features = ["std", "autodiff", "optim", "flex", "store"] }
+inhouse-tts-core = { workspace = true }
+inhouse-tts-data = { path = "../inhouse-tts-data" }
+inhouse-tts-text = { workspace = true, features = ["embed-lexicons"] }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true

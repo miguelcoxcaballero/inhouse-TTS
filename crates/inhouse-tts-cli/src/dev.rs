@@ -289,6 +289,46 @@ pub fn run(args: &[String]) -> bool {
             }
             let _ = vf.take(&voice);
         }
+        Some("ihv1-synth") => {
+            // Inference of an exported IHV1 model (numerical checks).
+            use inhouse_tts_core::model::ihv1::{Ihv1, Ihv1Options};
+            let model = arg(&args, "--model").expect("--model");
+            let ph = arg(&args, "--ph").expect("--ph");
+            let out = arg(&args, "--out").expect("--out");
+            let speaker: usize = arg(&args, "--speaker")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(0);
+            let locale: usize = arg(&args, "--locale")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(0);
+            let noise: f32 = arg(&args, "--noise")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(0.667);
+            let t = Instant::now();
+            let m = Ihv1::load(
+                WeightFile::parse(&std::fs::read(&model).unwrap()).unwrap(),
+                true,
+            )
+            .unwrap();
+            println!("loaded in {:?}", t.elapsed());
+            let t = Instant::now();
+            let audio = m.synthesize(
+                &ph,
+                speaker,
+                locale,
+                Ihv1Options {
+                    noise,
+                    ..Default::default()
+                },
+            );
+            let el = t.elapsed().as_secs_f64();
+            let dur = audio.len() as f64 / m.sample_rate as f64;
+            println!(
+                "{dur:.2}s audio in {el:.3}s (RTF {:.3})",
+                el / dur.max(1e-9)
+            );
+            std::fs::write(&out, dsp::wav_bytes(&audio, m.sample_rate)).unwrap();
+        }
         Some("build-lexicon") => {
             // Merges misaki gold + silver JSON lexicons into the compact
             // `.lex` text format: `word\tphonemes` or

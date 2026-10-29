@@ -5,3 +5,5 @@
 *.pth
 *.pt
 /out*.wav
+/data
+/runs

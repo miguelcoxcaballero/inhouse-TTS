@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/inhouse-tts-core", "crates/inhouse-tts-text", "crates/inhouse-tts", "crates/inhouse-tts-cli", "crates/inhouse-tts-web", "crates/inhouse-tts-android", "crates/xtask"]
+members = ["crates/inhouse-tts-core", "crates/inhouse-tts-text", "crates/inhouse-tts", "crates/inhouse-tts-cli", "crates/inhouse-tts-web", "crates/inhouse-tts-android", "crates/inhouse-tts-data", "crates/inhouse-tts-train", "crates/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -30,3 +30,9 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Training tools: no LTO, parallel codegen (much faster builds on small machines such as Colab).
+[profile.train]
+inherits = "release"
+lto = false
+codegen-units = 16

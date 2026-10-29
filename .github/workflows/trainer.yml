@@ -1,0 +1,59 @@
+name: Trainer (CUDA build for Colab)
+
+# Builds the Rust training tools with the CUDA backend on the same Ubuntu
+# release as Google Colab and publishes them as the `trainer-latest`
+# pre-release, so the Colab notebook does not have to compile them.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/inhouse-tts-core/**"
+      - "crates/inhouse-tts-text/**"
+      - "crates/inhouse-tts-data/**"
+      - "crates/inhouse-tts-train/**"
+      - "corpora/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/trainer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: trainer
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: trainer
+      - name: Unit tests (data and training crates, CPU)
+        run: cargo test --profile train -p inhouse-tts-data -p inhouse-tts-train
+      - name: Build (CUDA backend)
+        run: cargo build --profile train -p inhouse-tts-data -p inhouse-tts-train --features inhouse-tts-train/cuda
+      - name: Package
+        run: |
+          mkdir -p dist/ihtts
+          cp target/train/ihtts-train target/train/ihtts-data dist/ihtts/
+          git rev-parse HEAD > dist/ihtts/REVISION
+          tar -C dist -czf dist/ihtts-trainer-cuda-linux-x86_64.tar.gz ihtts
+      - name: Publish the trainer-latest pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: trainer-latest
+          name: Trainer (latest main)
+          body: |
+            Rust training tools of Inhouse TTS built with the CUDA backend
+            (Ubuntu 22.04, x86-64) from ${{ github.sha }}. Used by
+            `train/colab.ipynb`.
+          prerelease: true
+          make_latest: false
+          files: dist/ihtts-trainer-cuda-linux-x86_64.tar.gz
+          overwrite_files: true

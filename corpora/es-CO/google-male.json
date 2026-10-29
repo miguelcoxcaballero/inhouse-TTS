@@ -1,0 +1,24 @@
+{
+  "name": "es-CO-google-male",
+  "locale": "es-CO",
+  "license": "CC-BY-SA-4.0",
+  "source": "https://www.openslr.org/72/ (Crowdsourced high-quality Colombian Spanish speech data set, Google)",
+  "urls": [
+    "https://www.openslr.org/resources/72/line_index_male.tsv",
+    "https://www.openslr.org/resources/72/es_co_male.zip"
+  ],
+  "layout": {
+    "kind": "index",
+    "files": [
+      "line_index_male.tsv"
+    ],
+    "delimiter": "\t",
+    "audio_col": 0,
+    "text_col": 1,
+    "audio_dir": "es_co_male",
+    "audio_ext": "wav",
+    "speaker": {
+      "id_prefix": 2
+    }
+  }
+}
