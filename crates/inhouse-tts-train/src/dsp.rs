@@ -150,6 +150,8 @@ pub fn pqmf(subbands: usize, taps: usize, cutoff: f64, beta: f64) -> (Vec<f32>, 
 
 /// Linear magnitude spectrogram `[n/2+1, len/hop]` of a waveform whose
 /// length is a multiple of `hop` (reflect padding of (n-hop)/2 per side).
+/// Reference for the on-device [`crate::model::Consts::linear`].
+#[cfg(test)]
 pub fn spectrogram(x: &[f32], n: usize, hop: usize) -> Vec<f32> {
     let pad = (n - hop) / 2;
     let len = x.len();
@@ -184,6 +186,7 @@ pub fn spectrogram(x: &[f32], n: usize, hop: usize) -> Vec<f32> {
 }
 
 /// In-place radix-2 FFT.
+#[cfg(test)]
 pub fn fft(re: &mut [f64], im: &mut [f64]) {
     let n = re.len();
     let mut j = 0;

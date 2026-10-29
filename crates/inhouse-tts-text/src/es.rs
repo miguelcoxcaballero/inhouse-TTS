@@ -569,6 +569,26 @@ fn is_spelled_acronym(w: &str) -> bool {
         || lower.windows(3).any(|t| t.iter().all(consonant))
 }
 
+/// Pre-1952 spelling, common in public-domain books: the preposition and
+/// conjunctions written with an accent (`á`, `é`, `ó`, `ú`) and accented
+/// monosyllabic verbs (`fué`, `dió`), which are unstressed or written
+/// without the accent today.
+fn modernize(w: &str) -> String {
+    let m = match w {
+        "á" => "a",
+        "é" => "e",
+        "ó" => "o",
+        "ú" => "u",
+        "fué" => "fue",
+        "fuí" => "fui",
+        "dió" => "dio",
+        "vió" => "vio",
+        "pié" => "pie",
+        _ => w,
+    };
+    m.to_string()
+}
+
 /// Normalises raw text into a sequence of plain lower-case words and
 /// punctuation tokens.
 fn normalize(text: &str, acc: &Accent) -> Vec<Tok> {
@@ -628,7 +648,7 @@ fn normalize(text: &str, acc: &Accent) -> Vec<Tok> {
                 } else {
                     for part in lw.split('-') {
                         if !part.is_empty() {
-                            out.push(Tok::Word(part.replace('\'', "")));
+                            out.push(Tok::Word(modernize(&part.replace('\'', ""))));
                         }
                     }
                 }
@@ -1387,6 +1407,13 @@ mod tests {
         assert_eq!(es("guerra"), "ɡˈera");
         assert_eq!(es("electricidad"), "ˌelektɾˌiθiðˈad");
         assert_eq!(es("rápidamente"), "rˈapiðamˈente");
+    }
+
+    #[test]
+    fn old_spelling() {
+        assert_eq!(es("salvaré á tus hijos"), es("salvaré a tus hijos"));
+        assert_eq!(es("uno ó dos"), es("uno o dos"));
+        assert_eq!(es("Fué allí"), es("Fue allí"));
     }
 
     #[test]

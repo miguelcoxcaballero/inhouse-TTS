@@ -6,8 +6,8 @@ use crate::data::{Dataset, Rng, Tables};
 use crate::disc::{disc_loss, feature_loss, gen_loss, Discriminator};
 use crate::model::{Consts, Synthesizer};
 use burn::module::Module;
-use burn::optim::{AdamWConfig, GradientsParams};
-use burn::store::{ModuleSnapshot, SafetensorsStore};
+use burn::optim::{AdamWConfig, GradientsParams, ModuleOptimizer};
+use burn::store::{BurnpackStore, ModuleSnapshot};
 use burn::tensor::{Device, Int, Tensor, TensorData};
 use std::fs;
 use std::io::Write;
@@ -32,24 +32,73 @@ pub fn write_wav(path: &Path, x: &[f32], rate: u32) {
     let _ = inhouse_tts_data::audio::write_wav(path, x, rate);
 }
 
-pub fn save(
-    net: &Synthesizer,
-    disc: &Discriminator,
-    dir: &Path,
-    step: usize,
-) -> Result<(), String> {
-    let mut s = SafetensorsStore::from_file(dir.join("generator.safetensors"));
-    net.save_into(&mut s)
+/// Training state: generator, discriminator and both optimizers.
+pub struct Checkpoint<'a> {
+    pub net: &'a Synthesizer,
+    pub disc: &'a Discriminator,
+    pub opt_g: &'a ModuleOptimizer,
+    pub opt_d: &'a ModuleOptimizer,
+}
+
+fn bpk(path: PathBuf) -> BurnpackStore {
+    BurnpackStore::from_file(path)
+        .auto_extension(false)
+        .overwrite(true)
+}
+
+/// Checkpoints are written to `ckpt-<step>/`, and `latest` names the newest
+/// complete one only after all its files are written. An interrupted save
+/// (a Colab disconnect) therefore never leaves a torn checkpoint behind
+/// `latest`. The current and the previous checkpoint are kept.
+pub fn save(c: &Checkpoint, dir: &Path, step: usize) -> Result<(), String> {
+    let name = format!("ckpt-{step:07}");
+    let ck = dir.join(&name);
+    fs::create_dir_all(&ck).map_err(|e| e.to_string())?;
+    c.net
+        .save_into(&mut bpk(ck.join("generator.bpk")))
         .map_err(|e| format!("save generator: {e:?}"))?;
-    let mut s = SafetensorsStore::from_file(dir.join("discriminator.safetensors"));
-    disc.save_into(&mut s)
+    c.disc
+        .save_into(&mut bpk(ck.join("discriminator.bpk")))
         .map_err(|e| format!("save discriminator: {e:?}"))?;
-    fs::write(dir.join("step"), step.to_string()).map_err(|e| e.to_string())
+    c.opt_g
+        .save(ck.join("opt_g.bpk"))
+        .map_err(|e| format!("save optimizer: {e:?}"))?;
+    c.opt_d
+        .save(ck.join("opt_d.bpk"))
+        .map_err(|e| format!("save optimizer: {e:?}"))?;
+    fs::write(ck.join("step"), step.to_string()).map_err(|e| e.to_string())?;
+    fs::write(dir.join("latest.tmp"), &name).map_err(|e| e.to_string())?;
+    fs::rename(dir.join("latest.tmp"), dir.join("latest")).map_err(|e| e.to_string())?;
+    let mut all: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("ckpt-"))
+        })
+        .collect();
+    // Keep the previous checkpoint; older ones and any newer leftovers of
+    // an interrupted run (resumed from an earlier step) go.
+    all.sort();
+    let prev = all.iter().filter(|p| **p < ck).next_back().cloned();
+    for p in all {
+        if p != ck && Some(&p) != prev.as_ref() {
+            let _ = fs::remove_dir_all(p);
+        }
+    }
+    Ok(())
+}
+
+/// The newest complete checkpoint directory of a run.
+pub fn latest(dir: &Path) -> Option<PathBuf> {
+    let name = fs::read_to_string(dir.join("latest")).ok()?;
+    let ck = dir.join(name.trim());
+    ck.join("step").exists().then_some(ck)
 }
 
 pub fn load_generator(net: &mut Synthesizer, dir: &Path) -> Result<(), String> {
-    let mut s = SafetensorsStore::from_file(dir.join("generator.safetensors"));
-    net.load_from(&mut s)
+    let ck = latest(dir).ok_or_else(|| format!("{}: no checkpoint", dir.display()))?;
+    net.load_from(&mut bpk(ck.join("generator.bpk")))
         .map(|_| ())
         .map_err(|e| format!("load generator: {e:?}"))
 }
@@ -106,31 +155,35 @@ pub fn train(
         run.tables.locales.len(),
     );
     let mut disc = Discriminator::new(&dev, &cfg.model.periods, cfg.model.disc_scale);
+    let t = &cfg.train;
+    let adamw = || {
+        AdamWConfig::new()
+            .with_beta_1(t.betas.0)
+            .with_beta_2(t.betas.1)
+            .with_epsilon(1e-9)
+            .with_weight_decay(0.01)
+            .init()
+    };
+    let mut opt_g = adamw();
+    let mut opt_d = adamw();
     let mut start = 0;
-    if resume && run.dir.join("generator.safetensors").exists() {
-        load_generator(&mut net, &run.dir)?;
-        let mut s = SafetensorsStore::from_file(run.dir.join("discriminator.safetensors"));
-        disc.load_from(&mut s)
+    if let Some(ck) = latest(&run.dir).filter(|_| resume) {
+        net.load_from(&mut bpk(ck.join("generator.bpk")))
+            .map_err(|e| format!("load generator: {e:?}"))?;
+        disc.load_from(&mut bpk(ck.join("discriminator.bpk")))
             .map_err(|e| format!("load discriminator: {e:?}"))?;
-        start = fs::read_to_string(run.dir.join("step"))
+        opt_g = opt_g
+            .load(ck.join("opt_g.bpk"))
+            .map_err(|e| format!("load optimizer: {e:?}"))?;
+        opt_d = opt_d
+            .load(ck.join("opt_d.bpk"))
+            .map_err(|e| format!("load optimizer: {e:?}"))?;
+        start = fs::read_to_string(ck.join("step"))
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
-        eprintln!("resumed at step {start}");
+        eprintln!("resumed from {} at step {start}", ck.display());
     }
-    let t = &cfg.train;
-    let mut opt_g = AdamWConfig::new()
-        .with_beta_1(t.betas.0)
-        .with_beta_2(t.betas.1)
-        .with_epsilon(1e-9)
-        .with_weight_decay(0.01)
-        .init();
-    let mut opt_d = AdamWConfig::new()
-        .with_beta_1(t.betas.0)
-        .with_beta_2(t.betas.1)
-        .with_epsilon(1e-9)
-        .with_weight_decay(0.01)
-        .init();
     let mut rng = Rng::new(t.seed + start as u64);
     let mut log = fs::OpenOptions::new()
         .create(true)
@@ -204,7 +257,13 @@ pub fn train(
             let _ = writeln!(log, "{line}");
         }
         if (step + 1) % t.save_every == 0 || step + 1 == steps {
-            save(&net, &disc, &run.dir, step + 1)?;
+            let c = Checkpoint {
+                net: &net,
+                disc: &disc,
+                opt_g: &opt_g,
+                opt_d: &opt_d,
+            };
+            save(&c, &run.dir, step + 1)?;
         }
         if (step + 1) % t.eval_every == 0 || step + 1 == steps {
             eval(&net, &run, &k, &dev, step + 1, &sentences);
@@ -212,4 +271,46 @@ pub fn train(
     }
     let _ = (net.num_params(), disc.num_params());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nn::Conv;
+    use burn::tensor::Distribution;
+
+    fn weights(c: &Conv) -> Vec<f32> {
+        c.v.val().into_data().try_to_vec::<f32>().unwrap()
+    }
+
+    #[test]
+    fn optimizer_state_survives_a_checkpoint() {
+        let dev = Device::flex().autodiff();
+        let dir = std::env::temp_dir().join(format!("ihtts-ckpt-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let x = Tensor::<3>::random([2, 4, 16], Distribution::Normal(0.0, 1.0), &dev);
+        let step = |c: Conv, opt: &mut ModuleOptimizer| {
+            let loss = (c.forward(x.clone()) - 0.5).powi_scalar(2).mean();
+            let g = GradientsParams::from_grads(loss.backward(), &c);
+            opt.step(1e-2, c, g)
+        };
+        let mut opt = AdamWConfig::new().init();
+        let a = step(Conv::pointwise(&dev, 4, 4), &mut opt);
+        a.save_into(&mut bpk(dir.join("m.bpk"))).unwrap();
+        opt.save(dir.join("o.bpk")).unwrap();
+        // Uninterrupted second step.
+        let want = weights(&step(a, &mut opt));
+        // Second step after restoring into a fresh module and optimizer.
+        let mut b = Conv::pointwise(&dev, 4, 4);
+        b.load_from(&mut bpk(dir.join("m.bpk"))).unwrap();
+        let mut opt_b = AdamWConfig::new().init().load(dir.join("o.bpk")).unwrap();
+        let got = weights(&step(b, &mut opt_b));
+        // Without the moments the second Adam step would differ.
+        let err = want
+            .iter()
+            .zip(&got)
+            .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(err < 1e-6, "restored step differs by {err}");
+    }
 }

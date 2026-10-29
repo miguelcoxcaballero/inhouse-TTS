@@ -1,15 +1,13 @@
-//! Training data: manifests → symbol, speaker and locale tables, cached
-//! spectrograms and padded batches.
+//! Training data: manifests → symbol, speaker and locale tables, and padded
+//! batches of phoneme ids and waveforms read from disk.
 
 use crate::config::Config;
-use crate::dsp;
 use crate::model::Batch;
 use burn::tensor::{Device, Int, Tensor, TensorData};
 use inhouse_tts_data::Utterance;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Small deterministic PRNG (PCG32).
@@ -97,11 +95,12 @@ impl Tables {
     }
 }
 
-/// One example in memory.
+/// One example. Its audio stays on disk and is read when a batch needs it
+/// (the OS page cache keeps hot files in memory), so RAM does not grow with
+/// the corpus.
 struct Example {
     ids: Vec<i64>,
-    wav: Vec<f32>,
-    spec: Vec<f32>,
+    path: PathBuf,
     frames: usize,
     speaker: usize,
     locale: usize,
@@ -109,31 +108,48 @@ struct Example {
 
 pub struct Dataset {
     examples: Vec<Example>,
-    bins: usize,
     hop: usize,
 }
 
 pub const SR: u32 = 24_000;
 
-fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
-    let a = inhouse_tts_data::audio::load(path)?;
-    if a.rate != SR {
-        return Ok(inhouse_tts_data::audio::resample(&a.samples, a.rate, SR));
+/// Sample count of a 24 kHz mono 16-bit WAV (as written by `ihtts-data`).
+fn wav_len(path: &Path) -> Result<usize, String> {
+    let r = hound::WavReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let s = r.spec();
+    if s.sample_rate != SR || s.channels != 1 || s.bits_per_sample != 16 {
+        return Err(format!(
+            "{}: expected 24 kHz mono 16-bit WAV (prepare the corpus with ihtts-data)",
+            path.display()
+        ));
     }
-    Ok(a.samples)
+    Ok(r.duration() as usize)
+}
+
+/// The first `n` samples of such a WAV, as floats.
+fn read_wav(path: &Path, n: usize) -> Vec<f32> {
+    let Ok(mut r) = hound::WavReader::open(path) else {
+        return vec![0.0; n];
+    };
+    let mut x: Vec<f32> = r
+        .samples::<i16>()
+        .take(n)
+        .map(|v| v.unwrap_or(0) as f32 / 32768.0)
+        .collect();
+    x.resize(n, 0.0);
+    x
 }
 
 impl Dataset {
-    /// Loads every utterance of the manifests (spectrograms are cached as
-    /// `<wav>.spec` files next to the audio).
+    /// Indexes every usable utterance of the manifests (lengths come from the
+    /// WAV headers; no audio is decoded here).
     pub fn load(
         manifests: &[PathBuf],
         cfg: &Config,
         tables: &Tables,
         max_items: usize,
     ) -> Result<Dataset, String> {
-        let (n_fft, hop) = (cfg.audio.n_fft, cfg.audio.hop);
-        let bins = n_fft / 2 + 1;
+        let hop = cfg.audio.hop;
         let mut items: Vec<(PathBuf, Utterance)> = Vec::new();
         for m in manifests {
             let dir = m.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -143,44 +159,33 @@ impl Dataset {
         }
         items.truncate(max_items);
         let max_frames = cfg.train.max_frames;
-        let examples: Vec<Example> = items
+        let examples: Vec<Result<Option<Example>, String>> = items
             .par_iter()
-            .filter_map(|(path, u)| {
-                let mut wav = read_wav(path).ok()?;
-                let frames = wav.len() / hop;
+            .map(|(path, u)| {
+                let frames = wav_len(path)? / hop;
                 if frames < cfg.train.segment_frames + 2 || frames > max_frames {
-                    return None;
+                    return Ok(None);
                 }
-                wav.truncate(frames * hop);
-                let cache = path.with_extension("spec");
-                let spec = match fs::read(&cache) {
-                    Ok(b) if b.len() == bins * frames * 4 => b
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                        .collect(),
-                    _ => {
-                        let s = dsp::spectrogram(&wav, n_fft, hop);
-                        let bytes: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
-                        let _ = fs::write(&cache, bytes);
-                        s
-                    }
-                };
-                Some(Example {
+                Ok(Some(Example {
                     ids: tables.encode(&u.phonemes),
-                    wav,
-                    spec,
+                    path: path.clone(),
                     frames,
                     speaker: tables.speaker(&u.speaker),
                     locale: tables.locale(&u.locale),
-                })
+                }))
             })
             .collect();
-        if examples.is_empty() {
+        let mut kept = Vec::with_capacity(examples.len());
+        for e in examples {
+            if let Some(e) = e? {
+                kept.push(e);
+            }
+        }
+        if kept.is_empty() {
             return Err("no usable utterances".into());
         }
         Ok(Dataset {
-            examples,
-            bins,
+            examples: kept,
             hop,
         })
     }
@@ -190,7 +195,12 @@ impl Dataset {
     }
 
     pub fn hours(&self) -> f64 {
-        self.examples.iter().map(|e| e.wav.len()).sum::<usize>() as f64 / SR as f64 / 3600.0
+        self.examples
+            .iter()
+            .map(|e| e.frames * self.hop)
+            .sum::<usize>() as f64
+            / SR as f64
+            / 3600.0
     }
 
     /// Random batch of similar-length utterances (length bucketing keeps
@@ -207,26 +217,24 @@ impl Dataset {
         let b = ex.len();
         let tx = ex.iter().map(|e| e.ids.len()).max().unwrap_or(1);
         let ty = ex.iter().map(|e| e.frames).max().unwrap_or(1);
+        let wavs: Vec<Vec<f32>> = ex
+            .par_iter()
+            .map(|e| read_wav(&e.path, e.frames * self.hop))
+            .collect();
         let mut ids = vec![0i64; b * tx];
         let mut id_mask = vec![0f32; b * tx];
-        let mut spec = vec![0f32; b * self.bins * ty];
         let mut spec_mask = vec![0f32; b * ty];
         let mut wav = vec![0f32; b * ty * self.hop];
         for (i, e) in ex.iter().enumerate() {
             ids[i * tx..i * tx + e.ids.len()].copy_from_slice(&e.ids);
             id_mask[i * tx..i * tx + e.ids.len()].fill(1.0);
-            for k in 0..self.bins {
-                let dst = &mut spec[(i * self.bins + k) * ty..(i * self.bins + k) * ty + e.frames];
-                dst.copy_from_slice(&e.spec[k * e.frames..(k + 1) * e.frames]);
-            }
             spec_mask[i * ty..i * ty + e.frames].fill(1.0);
-            wav[i * ty * self.hop..i * ty * self.hop + e.wav.len()].copy_from_slice(&e.wav);
+            wav[i * ty * self.hop..i * ty * self.hop + wavs[i].len()].copy_from_slice(&wavs[i]);
         }
         Batch {
             ids: Tensor::<2, Int>::from_data(TensorData::new(ids, [b, tx]), dev),
             id_mask: Tensor::from_data(TensorData::new(id_mask, [b, 1, tx]), dev),
             id_lens: ex.iter().map(|e| e.ids.len()).collect(),
-            spec: Tensor::from_data(TensorData::new(spec, [b, self.bins, ty]), dev),
             spec_mask: Tensor::from_data(TensorData::new(spec_mask, [b, 1, ty]), dev),
             spec_lens: ex.iter().map(|e| e.frames).collect(),
             wav: Tensor::from_data(TensorData::new(wav, [b, 1, ty * self.hop]), dev),

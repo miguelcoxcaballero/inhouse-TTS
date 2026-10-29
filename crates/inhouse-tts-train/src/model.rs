@@ -21,7 +21,6 @@ use burn::tensor::{activation, Device, Distribution, Int, Tensor, TensorData};
 pub struct Consts {
     pub istft_basis: Tensor<3>,
     pub pqmf_syn: Tensor<3>,
-    pub pqmf_ana: Tensor<3>,
     pub updown: Tensor<3>,
     pub stft_basis: Tensor<3>,
     pub mel_bank: Tensor<2>,
@@ -41,10 +40,9 @@ impl Consts {
         let istft_basis =
             Tensor::<1>::from_floats(dsp::istft_basis(n).as_slice(), dev).reshape([2 * bins, 1, n]);
         let taps = 62;
-        let (ana, syn) = dsp::pqmf(m.subbands, taps, 0.142, 9.0);
+        let (_, syn) = dsp::pqmf(m.subbands, taps, 0.142, 9.0);
         let sb = m.subbands;
         let pqmf_syn = Tensor::<1>::from_floats(syn.as_slice(), dev).reshape([1, sb, taps + 1]);
-        let pqmf_ana = Tensor::<1>::from_floats(ana.as_slice(), dev).reshape([sb, 1, taps + 1]);
         let mut ud = vec![0f32; sb * sb * sb];
         for k in 0..sb {
             ud[(k * sb + k) * sb] = sb as f32;
@@ -62,7 +60,6 @@ impl Consts {
         Consts {
             istft_basis,
             pqmf_syn,
-            pqmf_ana,
             updown,
             stft_basis,
             mel_bank,
@@ -75,9 +72,10 @@ impl Consts {
         }
     }
 
-    /// Log-mel spectrogram `[B, n_mels, T/hop]` of waveforms `[B, 1, T]`
-    /// (differentiable; same framing as the cached spectrograms).
-    pub fn mel(&self, y: Tensor<3>) -> Tensor<3> {
+    /// Magnitude spectrogram `[B, n_fft/2 + 1, T/hop]` of waveforms
+    /// `[B, 1, T]`: Hann window, frames centred by reflect padding (the
+    /// framing of [`dsp::spectrogram`]).
+    pub fn linear(&self, y: Tensor<3>) -> Tensor<3> {
         let pad = (self.n_fft - self.hop) / 2;
         let y = y.pad([(pad, pad)], PadMode::Reflect);
         let s = conv1d(
@@ -89,8 +87,13 @@ impl Consts {
         let bins = self.n_fft / 2 + 1;
         let re = s.clone().narrow(1, 0, bins);
         let im = s.narrow(1, bins, bins);
-        let mag = (re.powi_scalar(2) + im.powi_scalar(2) + 1e-9).sqrt();
-        let [b, _, t] = mag.dims();
+        (re.powi_scalar(2) + im.powi_scalar(2) + 1e-9).sqrt()
+    }
+
+    /// Log-mel spectrogram `[B, n_mels, T/hop]` (differentiable).
+    pub fn mel(&self, y: Tensor<3>) -> Tensor<3> {
+        let mag = self.linear(y);
+        let [b, bins, _] = mag.dims();
         let nm = self.mel_bank.dims()[0];
         let mel = self
             .mel_bank
@@ -98,7 +101,6 @@ impl Consts {
             .unsqueeze_dim::<3>(0)
             .expand([b, nm, bins])
             .matmul(mag);
-        let _ = t;
         mel.clamp_min(1e-5).log()
     }
 }
@@ -404,7 +406,6 @@ pub struct Batch {
     pub ids: Tensor<2, Int>,
     pub id_mask: Tensor<3>,
     pub id_lens: Vec<usize>,
-    pub spec: Tensor<3>,
     pub spec_mask: Tensor<3>,
     pub spec_lens: Vec<usize>,
     pub wav: Tensor<3>,
@@ -452,9 +453,9 @@ impl Synthesizer {
             self.dropout,
             true,
         );
-        let (z, _m_q, logs_q) = self
-            .enc_q
-            .forward(b.spec.clone(), b.spec_mask.clone(), g.clone());
+        // Linear spectrogram of the whole utterances, on the device.
+        let spec = k.linear(b.wav.clone()).detach();
+        let (z, _m_q, logs_q) = self.enc_q.forward(spec, b.spec_mask.clone(), g.clone());
         let z_p = self
             .flow
             .forward(z.clone(), b.spec_mask.clone(), g.clone(), false);
@@ -567,5 +568,39 @@ impl Synthesizer {
         let z = self.flow.forward(z_p, ymask, g.clone(), true);
         let y = self.dec.forward(z, g, k);
         y.into_data().try_to_vec::<f32>().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_spectrogram_matches_reference() {
+        let cfg = Config::tiny();
+        let dev = Device::flex();
+        let k = Consts::new(&cfg, &dev);
+        let hop = cfg.audio.hop;
+        let n = hop * 20;
+        let x: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / 24_000.0;
+                0.5 * (2.0 * std::f32::consts::PI * (220.0 + 900.0 * t) * t).sin()
+                    + 0.1 * ((i * 7919 % 1000) as f32 / 500.0 - 1.0)
+            })
+            .collect();
+        let want = dsp::spectrogram(&x, cfg.audio.n_fft, hop);
+        let got = k
+            .linear(Tensor::<1>::from_floats(x.as_slice(), &dev).reshape([1, 1, n]))
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(got.len(), want.len());
+        let peak = want.iter().fold(0f32, |m, v| m.max(*v));
+        let err = got
+            .iter()
+            .zip(&want)
+            .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(err < 1e-4 * peak, "max error {err} (peak {peak})");
     }
 }

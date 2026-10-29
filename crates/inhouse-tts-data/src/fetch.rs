@@ -5,7 +5,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
+/// One HTTP agent for the whole process, so connections are reused.
 fn agent() -> Result<ureq::Agent, String> {
+    static AGENT: std::sync::OnceLock<Result<ureq::Agent, String>> = std::sync::OnceLock::new();
+    AGENT.get_or_init(build_agent).clone()
+}
+
+fn build_agent() -> Result<ureq::Agent, String> {
     let mut cfg = ureq::Agent::config_builder().timeout_global(None);
     // Honour a custom CA bundle (corporate or sandbox proxies).
     if let Some(path) = std::env::var_os("SSL_CERT_FILE") {
@@ -23,6 +29,66 @@ fn agent() -> Result<ureq::Agent, String> {
         );
     }
     Ok(cfg.build().into())
+}
+
+/// Retries a request up to four times with exponential backoff.
+fn retry<T>(what: &str, mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut wait = 2;
+    let mut attempt = 0;
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < 4 => {
+                eprintln!("  {what}: {e}; retrying in {wait} s");
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+                wait *= 2;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Bytes `start..start + len` of `url`, and the total size of the resource.
+pub fn range(url: &str, start: u64, len: u64) -> Result<(Vec<u8>, u64), String> {
+    let agent = agent()?;
+    retry(url, || {
+        let mut resp = agent
+            .get(url)
+            .header("Range", &format!("bytes={start}-{}", start + len - 1))
+            .call()
+            .map_err(|e| format!("{url}: {e}"))?;
+        if resp.status() != 206 {
+            return Err(format!("{url}: no range support (HTTP {})", resp.status()));
+        }
+        let total = resp
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit('/').next())
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(|| format!("{url}: no Content-Range"))?;
+        let mut buf = Vec::with_capacity(len as usize);
+        resp.body_mut()
+            .as_reader()
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("{url}: {e}"))?;
+        Ok((buf, total))
+    })
+}
+
+/// A small text resource (an API response).
+pub fn get_text(url: &str) -> Result<String, String> {
+    let agent = agent()?;
+    retry(url, || {
+        agent
+            .get(url)
+            .call()
+            .map_err(|e| format!("{url}: {e}"))?
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| format!("{url}: {e}"))
+    })
 }
 
 /// Downloads `url` to `dest`, resuming a partial `dest.part` file.

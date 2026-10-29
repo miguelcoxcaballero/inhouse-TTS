@@ -25,6 +25,7 @@ burn = { version = "=0.22.1", default-features = false, features = ["std", "auto
 inhouse-tts-core = { workspace = true }
 inhouse-tts-data = { path = "../inhouse-tts-data" }
 inhouse-tts-text = { workspace = true, features = ["embed-lexicons"] }
+hound = "3.5"
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

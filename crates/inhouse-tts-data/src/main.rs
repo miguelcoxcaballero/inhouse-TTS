@@ -3,9 +3,12 @@
 //! ```text
 //! ihtts-data prepare corpora/es-ES-*.json --cache data/cache --out data/corpora [--limit N]
 //! ihtts-data inspect FILE.wav|FILE.flac|FILE.mp3
+//! ihtts-data cml-index --speakers 10246,12367 --out corpora/es-ES/x.tsv[.gz]
+//!                      [--items ITEM,...] [--repo freds0/cml_tts_dataset_spanish]
+//!                      [--cache data/cache]
 //! ```
 
-use inhouse_tts_data::{audio, prepare, CorpusSpec};
+use inhouse_tts_data::{audio, cml, prepare, CorpusSpec};
 use std::path::PathBuf;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -61,18 +64,48 @@ fn main() {
                     Ok(a) => {
                         let x = audio::resample(&a.samples, a.rate, 24_000);
                         println!(
-                            "{p}: {} Hz, {:.2} s, speech {:.1} dBFS, energy > 4 kHz {:.2} %, > 8 kHz {:.2} %",
+                            "{p}: {} Hz, {:.2} s, speech {:.1} dBFS, energy > 4 kHz {:.2} %, > 8 kHz {:.2} %, 99 % rolloff {:.0} Hz",
                             a.rate,
                             a.samples.len() as f64 / a.rate as f64,
                             audio::speech_db(&x, 24_000),
                             100.0 * audio::energy_above(&x, 24_000, 4000.0),
-                            100.0 * audio::energy_above(&x, 24_000, 8000.0)
+                            100.0 * audio::energy_above(&x, 24_000, 8000.0),
+                            audio::rolloff(&a.samples, a.rate, 0.99)
                         );
                     }
                     Err(e) => println!("{p}: {e}"),
                 }
             }
         }
-        _ => eprintln!("usage: ihtts-data prepare SPEC.json... [--cache DIR] [--out DIR] [--limit N] | inspect FILE..."),
+        Some("cml-index") => {
+            let cache = PathBuf::from(arg(&args, "--cache").unwrap_or_else(|| "data/cache".into()));
+            let repo =
+                arg(&args, "--repo").unwrap_or_else(|| "freds0/cml_tts_dataset_spanish".into());
+            let speakers = arg(&args, "--speakers")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            let items = arg(&args, "--items")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            let Some(out) = arg(&args, "--out") else {
+                eprintln!("cml-index: --out is required");
+                std::process::exit(2);
+            };
+            match cml::index(&repo, &speakers, &items, &cache, out.as_ref()) {
+                Ok(n) => println!("{out}: {n} segments"),
+                Err(e) => {
+                    eprintln!("cml-index: error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => eprintln!(
+            "usage: ihtts-data prepare SPEC.json... [--cache DIR] [--out DIR] [--limit N] | inspect FILE... | cml-index --speakers IDS --out FILE"
+        ),
     }
 }

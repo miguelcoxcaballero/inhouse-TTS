@@ -1,15 +1,17 @@
-//! Audio helpers for corpus preparation: decoding (any format Symphonia
-//! reads: WAV, FLAC, MP3, Ogg Vorbis), mono mixdown, band-limited
-//! resampling, silence trimming and loudness normalisation.
+//! Audio helpers for corpus preparation: decoding (WAV, FLAC, MP3, Ogg
+//! Vorbis through Symphonia; Opus in WebM or Ogg through `opus-decoder`),
+//! mono mixdown, band-limited resampling, silence trimming and loudness
+//! normalisation.
 
 use std::f64::consts::PI;
 use std::fs::File;
 use std::path::Path;
 
-use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
@@ -57,6 +59,9 @@ fn load_from(
         .ok_or("no audio codec parameters")?
         .clone();
     let track_id = track.id;
+    if params.codec == CODEC_ID_OPUS {
+        return decode_opus(&mut *format, track_id, &params);
+    }
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|e| format!("no decoder: {e}"))?;
@@ -93,6 +98,59 @@ fn load_from(
     Ok(Audio {
         samples: mono,
         rate,
+    })
+}
+
+/// Opus packets (from WebM/Matroska or Ogg) through the pure-Rust
+/// `opus-decoder`, at 48 kHz, without the encoder's pre-skip.
+fn decode_opus(
+    format: &mut dyn FormatReader,
+    track_id: u32,
+    params: &AudioCodecParameters,
+) -> Result<Audio, String> {
+    // OpusHead: magic, version, channel count, pre-skip (little endian).
+    let head = params.extra_data.as_deref().unwrap_or(&[]);
+    let (channels, pre_skip) = if head.len() >= 12 && head.starts_with(b"OpusHead") {
+        (
+            head[9].max(1) as usize,
+            u16::from_le_bytes([head[10], head[11]]) as usize,
+        )
+    } else {
+        (
+            params.channels.as_ref().map_or(1, |c| c.count()).max(1),
+            312,
+        )
+    };
+    let channels = channels.min(2);
+    let mut dec =
+        opus_decoder::OpusDecoder::new(48_000, channels).map_err(|e| format!("opus: {e}"))?;
+    // 120 ms, the longest Opus packet.
+    let mut pcm = vec![0f32; 5760 * channels];
+    let mut mono = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
+            Err(SymError::IoError(_)) => break,
+            Err(e) => return Err(format!("read error: {e}")),
+        };
+        if packet.track_id != track_id {
+            continue;
+        }
+        let n = dec
+            .decode_float(&packet.data, &mut pcm, false)
+            .map_err(|e| format!("opus: {e}"))?;
+        let inv = 1.0 / channels as f32;
+        mono.extend(
+            pcm[..n * channels]
+                .chunks_exact(channels)
+                .map(|f| f.iter().sum::<f32>() * inv),
+        );
+    }
+    mono.drain(..pre_skip.min(mono.len()));
+    Ok(Audio {
+        samples: mono,
+        rate: 48_000,
     })
 }
 
@@ -261,6 +319,53 @@ pub fn energy_above(x: &[f32], rate: u32, hz: f32) -> f32 {
     (hi / tot.max(1e-30)) as f32
 }
 
+/// Median spectral rolloff in Hz: the frequency below which `share` of each
+/// frame's spectral magnitude lies (as librosa computes it), over the frames
+/// within 50 dB of the loudest. Full-band speech has a 99 % rolloff above
+/// 10 kHz; narrow-band ("telephone") recordings stop near 6–7 kHz.
+pub fn rolloff(x: &[f32], rate: u32, share: f64) -> f32 {
+    let n = 2048;
+    if x.len() < n {
+        return 0.0;
+    }
+    let win: Vec<f64> = (0..n)
+        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos())
+        .collect();
+    // Every fourth frame of a hop-512 analysis is plenty for a median.
+    let starts: Vec<usize> = (0..x.len() - n).step_by(2048).collect();
+    let energy: Vec<f64> = starts
+        .iter()
+        .map(|&s| x[s..s + n].iter().map(|v| (*v as f64).powi(2)).sum::<f64>())
+        .collect();
+    let peak = energy.iter().cloned().fold(0.0, f64::max);
+    let mut frame = vec![0f64; n];
+    let mut freqs: Vec<f32> = Vec::new();
+    for (&s, &e) in starts.iter().zip(&energy) {
+        if e <= peak * 1e-5 {
+            continue;
+        }
+        for i in 0..n {
+            frame[i] = x[s + i] as f64 * win[i];
+        }
+        let mag: Vec<f64> = fft_power(&frame).iter().map(|p| p.sqrt()).collect();
+        let total: f64 = mag.iter().sum();
+        let mut acc = 0.0;
+        let k = mag
+            .iter()
+            .position(|m| {
+                acc += m;
+                acc >= share * total
+            })
+            .unwrap_or(mag.len() - 1);
+        freqs.push(k as f32 * rate as f32 / n as f32);
+    }
+    if freqs.is_empty() {
+        return 0.0;
+    }
+    freqs.sort_by(f32::total_cmp);
+    freqs[freqs.len() / 2]
+}
+
 fn fft_power(x: &[f64]) -> Vec<f64> {
     let n = x.len();
     let mut re = x.to_vec();
@@ -277,12 +382,16 @@ fn fft_power(x: &[f64]) -> Vec<f64> {
             re.swap(i, j);
         }
     }
+    // Twiddles of the largest stage; stage `len` uses every (n/len)-th.
+    let tw: Vec<(f64, f64)> = (0..n / 2)
+        .map(|k| (-2.0 * PI * k as f64 / n as f64).sin_cos())
+        .collect();
     let mut len = 2;
     while len <= n {
-        let ang = -2.0 * PI / len as f64;
+        let stride = n / len;
         for i in (0..n).step_by(len) {
             for k in 0..len / 2 {
-                let (s, c) = (ang * k as f64).sin_cos();
+                let (s, c) = tw[k * stride];
                 let (ar, ai) = (re[i + k + len / 2], im[i + k + len / 2]);
                 let (tr, ti) = (ar * c - ai * s, ar * s + ai * c);
                 re[i + k + len / 2] = re[i + k] - tr;
@@ -324,6 +433,26 @@ mod tests {
 
     fn rms(x: &[f32]) -> f32 {
         (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn rolloff_separates_narrow_from_full_band() {
+        // A tone sits at its own frequency; white noise spreads to Nyquist.
+        let r = rolloff(&tone(5000.0, 48_000, 2.0), 48_000, 0.99);
+        assert!((r - 5000.0).abs() < 100.0, "tone rolloff {r}");
+        let mut seed = 1u32;
+        let noise: Vec<f32> = (0..96_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f32 / (1 << 24) as f32 - 0.5
+            })
+            .collect();
+        let r = rolloff(&noise, 48_000, 0.99);
+        assert!(r > 23_000.0, "noise rolloff {r}");
+        // The same noise band-limited to 6 kHz (telephone-like).
+        let narrow = resample(&resample(&noise, 48_000, 12_000), 12_000, 48_000);
+        let r = rolloff(&narrow, 48_000, 0.99);
+        assert!(r < 7_000.0, "narrow-band rolloff {r}");
     }
 
     #[test]

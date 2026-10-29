@@ -1,0 +1,17 @@
+{
+  "name": "es-ES-ohf-dave",
+  "locale": "es-ES",
+  "license": "CC0-1.0",
+  "source": "https://github.com/OHF-Voice/voice-datasets (Nabu Casa / Open Home Foundation voice datasets, es_ES speaker dave; Castilian with distinción)",
+  "urls": [
+    "https://github.com/OHF-Voice/voice-datasets/releases/download/v1.0.0/es_ES-dave.zip"
+  ],
+  "layout": {
+    "kind": "pairs",
+    "dirs": [
+      "es_ES-dave/es-ES/*"
+    ],
+    "audio_ext": "webm",
+    "speaker": "single"
+  }
+}

@@ -118,6 +118,31 @@ Un único módulo WASM (0,9 MB con SIMD128 y WebGPU) cumple dos papeles:
 
 El JavaScript se limita a dos líneas de arranque por contexto.
 
+### 3.5 IHV1: el primer modelo propio, entrenado desde cero
+
+IHV1 es la primera voz propia de Inhouse TTS. No usa ningún modelo de terceros: ni pesos preentrenados, ni datos sintéticos, ni alineadores externos. Es de la familia VITS, la vía más barata y probada hacia una voz natural sin componentes ajenos: En LJSpeech, VITS obtiene 4,43 de MOS frente a 4,46 de las grabaciones. MB-iSTFT-VITS se queda muy cerca (4,67 frente a 4,75 en su propia evaluación) e infiere 3,5× más rápido en CPU.
+
+| Pieza | Diseño |
+|---|---|
+| Codificador de texto | 6 capas de atención con RoPE sobre fonemas (con un símbolo en blanco intercalado), *embedding* de acento (locale) sumado a la entrada y voz inyectada en la capa central (como VITS2) |
+| Alineación | MAS (*monotonic alignment search*) en CPU durante el entrenamiento; predictor de log-duración determinista |
+| Posterior y flujo | WaveNet de 16 capas sobre el espectrograma lineal; 4 acoplamientos *mean-only* condicionados por la voz |
+| Decodificador | iSTFT multibanda: upsampling ×4 ×4, iSTFT de 16 puntos con salto 4 en 4 sub-bandas y síntesis PQMF de 63 coeficientes, hasta 24 kHz |
+| Pérdidas | LSGAN con discriminadores multi-periodo (2, 3, 5, 7, 11) y multi-escala, *feature matching* ×2, L1 de mel ×45, KL y duración |
+| Optimización | AdamW (0,8, 0,99), lr 2·10⁻⁴ con decaimiento exponencial |
+
+- **Entrenamiento en Rust** (`crates/inhouse-tts-train`, binario `ihtts-train`) con *burn* 0.22. Se ejecuta en CPU (`burn-flex`), Vulkan, Metal o DX12 (`wgpu`) y CUDA (CubeCL).
+  - Los audios se leen de disco en cada lote y el espectrograma lineal se calcula en el dispositivo, así que la RAM no crece con el corpus.
+  - Cada checkpoint (generador, discriminador y los dos estados de AdamW) se escribe completo en `ckpt-<paso>/` antes de que `latest` lo señale. Un corte no deja un checkpoint roto y la reanudación es exacta; hay un test que lo comprueba.
+- **Inferencia en el motor** (`inhouse-tts-core::model::ihv1`), sobre los mismos kernels SIMD que K82. Coincide con el entrenador con un error máximo de 1 LSB. RTF 0,04 con el preset `tiny`.
+- **Presets**: `base` (~30M parámetros, GPU), `small` (decodificador de 384 canales, T4 de 16 GB), `tiny` (CPU, solo para validar).
+- **Google Colab**: `train/colab.ipynb` descarga el entrenador CUDA precompilado (release `trainer-latest`) y el corpus ya preparado (release `data-<locale>`). Entrena con checkpoints en Google Drive y continúa tras cada corte de sesión.
+- **Datos** (`crates/inhouse-tts-data`, binario `ihtts-data`, especificaciones en [`corpora/`](../corpora/README.md)): descarga reanudable y decodificación de WAV, FLAC, MP3, Vorbis y Opus/WebM, todo en Rust. Remuestreo Kaiser-sinc propio a 24 kHz, recorte de silencios, normalización y fonetización con el acento del corpus.
+  - Un filtro de ancho de banda (*rolloff* del 99 % ≥ 10 kHz) rechaza las grabaciones «de teléfono».
+  - `ihtts-data cml-index` reconstruye los segmentos de CML-TTS, cortados de los MP3 originales de 128 kbps de LibriVox en lugar de sus derivados de 64 kbps a 22 kHz.
+
+IHV1 es el escalón práctico hacia IH-1 (§4): fija la tubería de datos, el entrenamiento y la exportación, y da voces propias mientras se desarrolla el modelo de latentes a 12,5 Hz.
+
 ## 4. IH-1: arquitectura del modelo propio
 
 ### 4.1 Principios, a partir de la investigación
@@ -242,10 +267,11 @@ Como referencia, K82 cuesta **53 GFLOP por segundo de audio**. IH-1 Base es unas
 
 1. Base de inglés: HiFiTTS-2, LibriTTS-R, Hi-Fi TTS y Emilia-YODAS en inglés.
 2. Acentos de inglés: VCTK, SLR83, GLOBE_V2, Common Voice y VoxPopuli.
-3. Español: sets de Google SLR61/71–75 (AR, CL, CO, PE, PR, VE), MLS/CML-TTS es, Common Voice es (incluido México), OHF es_ES y VoxPopuli es.
-4. Portugués, francés e italiano: OHF, TTS-Portuguese, SIWIS, MLS/CML-TTS, Common Voice y VoxPopuli.
-5. **Datos sintéticos de K82** (Apache-2.0) para el inglés y el español, y para destilar la prosodia.
-6. Huecos (pt-PT, fr-CA): campaña de grabación CC0.
+3. Español: lectores de LibriVox con acento verificado, cortados de los originales de 128 kbps con el índice de CML-TTS (castellano: ver [`corpora/README.md`](../corpora/README.md)); sets de Google SLR61/71–75 (AR, CL, CO, PE, PR, VE; CC BY-SA); OHF es_ES; Common Voice es filtrado por calidad. MLS, CSS10, M-AILABS y VoxPopuli son de 16–22 kHz o de banda estrecha y no se usan para el vocoder.
+4. Portugués, francés e italiano: OHF, TTS-Portuguese, SIWIS, LibriVox/CML-TTS (originales de 128 kbps), Common Voice y VoxPopuli.
+5. Huecos (pt-PT, fr-CA, Andalucía, Canarias): campaña de grabación CC0.
+
+Sin datos sintéticos de otros modelos: todas las voces salen de grabaciones humanas con licencia permisiva.
 
 **Cómputo estimado:** codec ~1–2 GPU·día, profesor ~3–5 GPU·día, alumnos ~2 GPU·día. En total, del orden de **500 a 1.500 $** de GPU alquilada. Como referencia, Kyutai entrena 2.000 h en ~9 h de una H100.
 

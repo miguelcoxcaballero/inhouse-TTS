@@ -1,0 +1,66 @@
+name: Training data (prepared corpus for Colab)
+
+# Prepares corpora/<voice>/*.json once (download, bandwidth gate, cutting,
+# resampling to 24 kHz, normalisation, phonemisation) and publishes the
+# result as the `data-<voice>` pre-release, in parts below GitHub's 2 GB
+# asset limit. The Colab notebook downloads it instead of preparing the
+# corpus in every session.
+
+on:
+  workflow_dispatch:
+    inputs:
+      voice:
+        description: Corpus directory under corpora/ (for example es-ES)
+        required: true
+        default: es-ES
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    env:
+      VOICE: ${{ inputs.voice }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build ihtts-data
+        run: cargo build --profile train -p inhouse-tts-data
+      - name: Prepare the corpus
+        run: |
+          test -d "corpora/$VOICE"
+          df -h / /mnt
+          sudo mkdir -p /mnt/ihtts && sudo chown "$USER" /mnt/ihtts
+          ./target/train/ihtts-data prepare corpora/"$VOICE"/*.json \
+            --cache /mnt/ihtts/cache --out /mnt/ihtts/data
+          rm -rf /mnt/ihtts/cache
+          for r in /mnt/ihtts/data/*/report.json; do echo "$r"; cat "$r"; echo; done
+      - name: Pack
+        run: |
+          cd /mnt/ihtts
+          cp -r "$GITHUB_WORKSPACE/corpora/$VOICE" data/specs
+          tar -cf - -C data . | split -b 1900M -d -a 2 - "data-$VOICE.tar."
+          ls "data-$VOICE".tar.* | xargs -n1 basename > "data-$VOICE.parts"
+          cat "data-$VOICE.parts"
+          du -sh data "data-$VOICE".tar.*
+      - name: Remove the previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "data-$VOICE" --cleanup-tag --yes || true
+      - name: Publish the data-${{ inputs.voice }} pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: data-${{ inputs.voice }}
+          name: Training data ${{ inputs.voice }}
+          prerelease: true
+          make_latest: false
+          body: |
+            Prepared training corpus for `corpora/${{ inputs.voice }}` (24 kHz mono 16-bit WAV, `manifest.jsonl` and `report.json` per corpus), built by the "Training data" workflow from ${{ github.sha }}.
+
+            Sources and licences are listed in each corpus specification (`specs/*.json` inside the archive). Download every part listed in `data-${{ inputs.voice }}.parts` and concatenate them: `cat data-${{ inputs.voice }}.tar.* | tar -x`.
+          files: |
+            /mnt/ihtts/data-${{ inputs.voice }}.parts
+            /mnt/ihtts/data-${{ inputs.voice }}.tar.*

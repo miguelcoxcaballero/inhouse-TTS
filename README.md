@@ -100,13 +100,24 @@ texto → normalización → G2P + reglas de acento → troceado → modelo acú
   - Pesos f32/f16/int8 en el formato propio `.ihw` y conversor seguro de checkpoints PyTorch (sin ejecutar pickle).
   - **Backend de GPU** con `wgpu`: convolución como GEMM implícita sobre los pesos int8, AdaIN con Snake fusionado y convolución transpuesta polifásica. Kernels WGSL embebidos en Rust.
 - **Modelo puente K82**: StyleTTS2 + iSTFTNet, compatible con los pesos Apache-2.0 de Kokoro-82M. **Reproduce la referencia con 106–131 dB de SNR** en cada etapa.
-- **Modelo propio IH-1**, en planificación: latentes continuos a 12,5 Hz, fonemas con *tokens* de acento y voz disociada del acento, entrenado en Rust (burn). Unas 40× menos cómputo que K82, para tiempo real en cualquier móvil y en WASM.
+- **Modelo propio IHV1**, entrenado desde cero sin ningún modelo de terceros: VITS con decodificador iSTFT multibanda, acento y voz como condiciones separadas. Los datos y el entrenamiento son Rust (`ihtts-data`, `ihtts-train` con *burn*), y la inferencia corre en el mismo motor (paridad de 1 LSB con el entrenador). Las primeras voces de castellano se entrenan en Google Colab con grabaciones de banda completa y acento verificado. Ver [Entrenar el modelo propio](#entrenar-el-modelo-propio).
+- **Modelo IH-1**, el siguiente paso: latentes continuos a 12,5 Hz, unas 40× menos cómputo que K82, para tiempo real en cualquier móvil y en WASM.
 
 Documentación:
 
 - [docs/RESEARCH.md](docs/RESEARCH.md) — investigación del estado del arte (modelos, licencias, ecosistema Rust, datos, eficiencia) y medidas propias.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — diseño del sistema, arquitectura del modelo IH-1, plan de entrenamiento y hoja de ruta.
 - [docs/ANDROID.md](docs/ANDROID.md) — integración en Android.
+
+## Entrenar el modelo propio
+
+[![Abrir en Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/miguelcoxcaballero/inhouse-TTS/blob/main/train/colab.ipynb)
+
+1. Abre el cuaderno [`train/colab.ipynb`](train/colab.ipynb) en Colab y elige *Entorno de ejecución → GPU*.
+2. Pulsa *Ejecutar todo*. El cuaderno descarga el entrenador CUDA precompilado y el corpus preparado, y entrena con checkpoints en tu Google Drive.
+3. Si la sesión se corta, vuelve a ejecutarlo: continúa desde el último checkpoint. Las muestras de audio se guardan en `MyDrive/inhouse-tts/runs/<voz>/samples/`.
+
+En local, `ihtts-data prepare corpora/es-ES/*.json` prepara los datos e `ihtts-train train --run runs/es-ES --preset small --data …/manifest.jsonl --device cuda|wgpu|cpu --resume` entrena. Los datos, sus licencias y la verificación de acento se describen en [corpora/README.md](corpora/README.md).
 
 ## Rendimiento (Xeon de 4 vCPU a 2,8 GHz)
 
@@ -127,6 +138,8 @@ El 88 % del cómputo es el vocoder iSTFTNet, ~25 GMAC por segundo de audio, y po
 - [x] GPU con `wgpu` (WebGPU, Vulkan, Metal, DX12) para el decodificador y el vocoder
 - [ ] AVX-512; hilos en WASM; medir y ajustar los kernels en GPUs reales
 - [ ] Portugués (BR/PT), francés (FR/CA), italiano e hindi en el front-end
+- [x] Datos y entrenamiento en Rust: corpus permisivos de banda completa con acento verificado, modelo propio IHV1, Colab
+- [ ] Primeras voces propias de castellano (en entrenamiento) y después de los demás acentos; retirar las voces puente
 - [ ] IH-Codec e IH-1 entrenados en Rust con datos permisivos y destilados a 8–30M parámetros
 
 ## Licencias y créditos

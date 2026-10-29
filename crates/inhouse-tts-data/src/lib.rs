@@ -6,6 +6,7 @@
 //! front end for the corpus' accent.
 
 pub mod audio;
+pub mod cml;
 pub mod corpus;
 pub mod fetch;
 

@@ -1,0 +1,14 @@
+{
+  "name": "es-ES-librivox-10246",
+  "locale": "es-ES",
+  "license": "Public domain (LibriVox recordings; CC0-1.0 on archive.org). Segmentation and transcripts: CML-TTS, CC-BY-4.0 (Oliveira et al., 2023).",
+  "source": "LibriVox reader 10246 (female, Castilian with distinción), cut from the 128 kbps originals on archive.org with the CML-TTS segment index (https://www.openslr.org/146/, https://huggingface.co/datasets/freds0/cml_tts_dataset_spanish). Index: ihtts-data cml-index --speakers 10246 --out corpora/es-ES/librivox-10246.tsv.gz",
+  "layout": {
+    "kind": "segments",
+    "index": "librivox-10246.tsv.gz",
+    "rewrite": [["_64kb.mp3", ".mp3"]],
+    "speaker": {"id_prefix": 1}
+  },
+  "min_rolloff_hz": 10000,
+  "max_hours": 30
+}

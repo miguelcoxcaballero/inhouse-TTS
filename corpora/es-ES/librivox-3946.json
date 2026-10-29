@@ -1,0 +1,14 @@
+{
+  "name": "es-ES-librivox-3946",
+  "locale": "es-ES",
+  "license": "Public domain (LibriVox recordings; CC0-1.0 on archive.org). Segmentation and transcripts: CML-TTS, CC-BY-4.0 (Oliveira et al., 2023).",
+  "source": "LibriVox reader 3946 (male, Castilian with distinción), only his full-band 2013-2016 recordings, cut from the 128 kbps originals with the CML-TTS segment index. Index: ihtts-data cml-index --speakers 3946 --items historia_de_herodoto_3_1401_librivox,laestafetaromantica_1409_librivox,luchana_1312_librivox,maestrazgo_1404_librivox,naufragios_1308_librivox,onate_granja_librivox --out corpora/es-ES/librivox-3946.tsv.gz",
+  "layout": {
+    "kind": "segments",
+    "index": "librivox-3946.tsv.gz",
+    "rewrite": [["_64kb.mp3", ".mp3"]],
+    "speaker": {"id_prefix": 1}
+  },
+  "min_rolloff_hz": 10000,
+  "max_hours": 15
+}
