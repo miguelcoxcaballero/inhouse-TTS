@@ -15,6 +15,9 @@ use crate::tensor::{Mat, Matrix};
 use crate::weights::{err, Result, WeightFile};
 use std::collections::BTreeMap;
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
 pub const SAMPLE_RATE: u32 = 24_000;
 /// Samples per predicted duration frame (24 kHz / 40 Hz).
 pub const SAMPLES_PER_FRAME: usize = 600;
@@ -36,12 +39,16 @@ pub struct LoadOptions {
     /// memory). When false, matrices stay compact (f16/int8) and are
     /// unpacked on every call.
     pub prepack: bool,
+    /// Keep the decoder weights compact so they can be uploaded to a GPU
+    /// (the decoder is then never pre-packed for the CPU).
+    pub gpu: bool,
 }
 
 impl Default for LoadOptions {
     fn default() -> Self {
         LoadOptions {
             prepack: !cfg!(target_arch = "wasm32"),
+            gpu: false,
         }
     }
 }
@@ -733,7 +740,11 @@ impl Generator {
             x = acc;
         }
         math::leaky_relu_inplace(&mut x.data, 0.01);
-        let y = self.conv_post.forward(&x);
+        self.spec_to_audio(&self.conv_post.forward(&x))
+    }
+
+    /// `conv_post` output (log-magnitude rows, then phase rows) → waveform.
+    fn spec_to_audio(&self, y: &Mat) -> Vec<f32> {
         let bins = N_FFT / 2 + 1;
         let frames = y.cols;
         let mut mag = Mat::zeros(bins, frames);
@@ -838,6 +849,20 @@ pub struct Output {
     pub durations: Vec<usize>,
 }
 
+/// Output of the model front (text → prosody → excitation): everything the
+/// decoder needs. Computed on the CPU; the decoder runs on the CPU
+/// ([`K82::decode`]) or on a GPU.
+pub struct DecoderInput {
+    /// Aligned text features `[512, F]` (40 Hz frames).
+    pub asr: Mat,
+    /// F0 and energy curves (`2F` values, 80 Hz).
+    pub f0: Vec<f32>,
+    pub n: Vec<f32>,
+    /// Source spectrum `[22, 120F + 1]` (magnitude rows, then phase rows).
+    pub har: Mat,
+    pub durations: Vec<usize>,
+}
+
 /// Intermediate tensors, exposed for numerical tests against the reference.
 #[derive(Default)]
 pub struct Trace {
@@ -876,6 +901,7 @@ impl K82 {
         let bert_encoder = l.linear("bert_encoder", BERT_HIDDEN, HIDDEN, true)?;
         let predictor = Predictor::load(&mut l)?;
         let text_encoder = TextEncoder::load(&mut l, n_tok)?;
+        l.prepack = opts.prepack && !opts.gpu;
         let decoder = Decoder::load(&mut l)?;
         Ok(K82 {
             vocab,
@@ -914,12 +940,49 @@ impl K82 {
         opts: InferOptions,
         mut trace: Option<&mut Trace>,
     ) -> Output {
+        let inp = self.prepare_traced(ids, style, opts, trace.as_deref_mut());
+        let mut prof = crate::profile::Profiler::new();
+        let x = self
+            .decoder
+            .trunk(&inp.asr, &inp.f0, &inp.n, &style[..STYLE_DIM]);
+        prof.mark("decoder");
+        if let Some(t) = trace.as_deref_mut() {
+            t.put("dec_decode3", &x.data);
+        }
+        let audio = self
+            .decoder
+            .generator
+            .forward(&x, &style[..STYLE_DIM], &inp.har);
+        prof.mark("generator");
+        prof.report();
+        if let Some(t) = trace {
+            t.put("audio", &audio);
+        }
+        Output {
+            audio,
+            durations: inp.durations,
+        }
+    }
+
+    /// Runs the model front: text context, durations, F0/energy, aligned
+    /// features and the harmonic excitation.
+    pub fn prepare(&self, ids: &[u32], style: &[f32], opts: InferOptions) -> DecoderInput {
+        self.prepare_traced(ids, style, opts, None)
+    }
+
+    fn prepare_traced(
+        &self,
+        ids: &[u32],
+        style: &[f32],
+        opts: InferOptions,
+        mut trace: Option<&mut Trace>,
+    ) -> DecoderInput {
         assert_eq!(
             style.len(),
             2 * STYLE_DIM,
             "style vector must have 256 values"
         );
-        let (s_dec, s_pro) = style.split_at(STYLE_DIM);
+        let s_pro = &style[STYLE_DIM..];
         let mut tr = |name: &str, v: &[f32]| {
             if let Some(t) = trace.as_deref_mut() {
                 t.put(name, v);
@@ -943,22 +1006,27 @@ impl K82 {
         tr("t_en", &t_en.data);
         let asr = t_en.repeat_cols(&durations);
         prof.mark("text_encoder");
-        let x = self.decoder.trunk(&asr, &f0, &n, s_dec);
-        prof.mark("decoder");
-        tr("dec_decode3", &x.data);
         let mut rng = opts.seed.map(Rng::new);
         let src = self.decoder.generator.source(&f0, rng.as_mut());
         tr("har_source", &src);
         let har = self.decoder.generator.source_spec(&src);
         tr("har", &har.data);
         prof.mark("source");
-        let audio = self.decoder.generator.forward(&x, s_dec, &har);
-        prof.mark("generator");
         prof.report();
-        if let Some(t) = trace {
-            t.put("audio", &audio);
+        DecoderInput {
+            asr,
+            f0,
+            n,
+            har,
+            durations,
         }
-        Output { audio, durations }
+    }
+
+    /// Runs the decoder and vocoder on the CPU.
+    pub fn decode(&self, inp: &DecoderInput, style: &[f32]) -> Vec<f32> {
+        let s_dec = &style[..STYLE_DIM];
+        let x = self.decoder.trunk(&inp.asr, &inp.f0, &inp.n, s_dec);
+        self.decoder.generator.forward(&x, s_dec, &inp.har)
     }
 
     /// Runs only the generator on given inputs (numerical tests).

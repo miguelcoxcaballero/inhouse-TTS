@@ -278,9 +278,24 @@ Con q8, ALBERT se degrada (29,7 dB) porque comparte la misma capa en 12 iteracio
 | Navegador (WASM SIMD128) | 1 worker | ~4 |
 | Navegador (WASM SIMD128) | GEMM aislado | 8–10 GMAC/s |
 
+**Backend de GPU** (`wgpu`, mismo modelo q8, misma entrada):
+
+| Prueba | Resultado |
+|---|---|
+| Vulkan (lavapipe) frente a la CPU, frase de 3,1 s | **101,4 dB** de SNR (q8) y **103,7 dB** (f32); error máximo 4,5·10⁻⁶ |
+| WebGPU en Chromium (Tint + SwiftShader) frente a WASM en CPU, WAV de 16 bits | **85,7 dB**: como mucho 1 LSB de diferencia |
+| Velocidad en adaptadores por software (lavapipe, SwiftShader) | RTF 7–40, porque emulan la GPU en la CPU. El modo automático los descarta |
+
+En este entorno de desarrollo no hay ninguna GPU física. Según el cómputo (~25 GMAC/s de audio) y la eficiencia típica de una GEMM de 64×64 en WGSL (20–40 % del pico), se espera:
+
+- RTF ≈ 0,05–0,15 en GPUs integradas recientes (Intel Xe, Apple M, Adreno 7xx);
+- RTF ≪ 0,05 en GPUs dedicadas.
+
+Está pendiente medirlo en hardware real.
+
 **Dónde se va el tiempo**: el 88 % del cómputo está en el generador iSTFTNet, ~25 GMAC por segundo de audio, igual que la tabla 6.1. La GEMM del motor ya va cerca del límite de cada ISA. Para el tiempo real en el navegador y en móviles modestos solo queda:
 
-- usar la GPU (WebGPU/wgpu), o
+- usar la GPU (WebGPU/wgpu), **ya implementado** (ver arriba), o
 - un modelo con decodificador a frecuencia de trama: unas 20–40× menos cómputo. Es el plan del modelo propio, en [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### 7.4 Front-end
@@ -294,7 +309,7 @@ Con q8, ALBERT se degrada (29,7 dB) porque comparte la misma capa en 12 iteracio
 
 ## 8. Conclusiones y decisiones
 
-1. **Motor propio en Rust puro, con CPU SIMD y WebGPU como siguiente paso.** Las opciones de Rust «puro» (Phonon/xn, burn, candle) confirman que es viable. Hemos escrito nuestro propio motor para controlar el formato de pesos, los kernels de SIMD de cada plataforma y el tamaño del binario WASM (1,6 MB).
+1. **Motor propio en Rust puro, con CPU SIMD y GPU (WebGPU, Vulkan, Metal o DX12 vía wgpu).** Las opciones de Rust «puro» (Phonon/xn, burn, candle) confirman que es viable. Hemos escrito nuestro propio motor para controlar el formato de pesos, los kernels de SIMD de cada plataforma y el tamaño del binario WASM (0,9 MB).
 2. **Modelo puente K82**: es compatible con los pesos Apache-2.0 de Kokoro-82M. Ofrece calidad top-10 abierta desde el primer día en inglés y español, y en francés, italiano, hindi y portugués de Brasil cuando estén sus front-ends. También servirá de **profesor** para destilar el modelo propio.
 3. **Front-end propio sin GPL**: reglas y léxicos con **13 acentos** (11 de español y 2 de inglés) y control explícito del acento por fonemas, la vía que la literatura de 2026 señala como la más auténtica cuando se combina con *embeddings*.
 4. **Modelo propio IH-1**: latentes continuos a 12,5 Hz, en la línea de CALM/Pocket TTS, con fonemas y *tokens* de acento, entrenado en Rust (burn) solo con datos permisivos. Objetivo: 20–40× menos cómputo que K82, tiempo real en cualquier móvil y en el navegador. Detalle en [ARCHITECTURE.md](ARCHITECTURE.md).

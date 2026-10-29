@@ -8,6 +8,8 @@
 
 pub mod dsp;
 pub mod gemm;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod math;
 pub mod model;
 pub mod ops;

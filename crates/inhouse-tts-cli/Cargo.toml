@@ -12,6 +12,11 @@ rust-version.workspace = true
 name = "inhouse-tts"
 path = "src/main.rs"
 
+[features]
+default = ["gpu"]
+# GPU acceleration through wgpu (Vulkan, Metal, DX12).
+gpu = ["inhouse-tts-core/gpu", "inhouse-tts/gpu"]
+
 [dependencies]
 inhouse-tts-core = { workspace = true, features = ["parallel", "convert"] }
 inhouse-tts-text = { workspace = true, features = ["embed-lexicons"] }

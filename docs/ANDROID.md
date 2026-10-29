@@ -37,10 +37,13 @@ La única pieza que no es Rust es esta clase de pegamento de unas 30 líneas, po
 ```kotlin
 package com.inhouse.tts
 
-class InhouseTts(model: ByteArray, voices: ByteArray) : AutoCloseable {
+class InhouseTts(model: ByteArray, voices: ByteArray, gpu: Boolean = true) : AutoCloseable {
     fun interface ChunkListener { fun onChunk(samples: FloatArray): Boolean }
 
-    private var handle = nativeCreate(model, voices)
+    private var handle = nativeCreate(model, voices, gpu)
+
+    /** "GPU <nombre>" si el decodificador corre en la GPU (Vulkan) o "CPU". */
+    val accelerator: String get() = nativeAccelerator(handle)
 
     /** Sintetiza todo el texto (PCM float mono, 24 kHz). */
     fun speak(text: String, locale: String = "es-ES", voice: String = "", speed: Float = 1f): FloatArray =
@@ -57,7 +60,8 @@ class InhouseTts(model: ByteArray, voices: ByteArray) : AutoCloseable {
     companion object {
         const val SAMPLE_RATE = 24_000
         init { System.loadLibrary("inhouse_tts_jni") }
-        @JvmStatic private external fun nativeCreate(model: ByteArray, voices: ByteArray): Long
+        @JvmStatic private external fun nativeCreate(model: ByteArray, voices: ByteArray, gpu: Boolean): Long
+        @JvmStatic private external fun nativeAccelerator(h: Long): String
         @JvmStatic private external fun nativeDestroy(handle: Long)
         @JvmStatic private external fun nativeSpeak(h: Long, text: String, locale: String, voice: String, speed: Float): FloatArray
         @JvmStatic private external fun nativeStream(h: Long, text: String, locale: String, voice: String, speed: Float, l: ChunkListener)
@@ -90,6 +94,8 @@ thread {
 
 ```c
 void*  ihtts_engine_new(const uint8_t* model, size_t model_len, const uint8_t* voices, size_t voices_len);
+void*  ihtts_engine_new_gpu(const uint8_t* model, size_t model_len, const uint8_t* voices, size_t voices_len);
+size_t ihtts_accelerator(const void* engine, char* buf, size_t len);  // "CPU" o "GPU <nombre>"
 float* ihtts_speak(void* engine, const char* text, const char* locale, const char* voice, float speed, size_t* out_len);
 void   ihtts_audio_free(float* samples, size_t len);
 void   ihtts_engine_free(void* engine);
@@ -97,5 +103,7 @@ uint32_t ihtts_sample_rate(void);
 ```
 
 ## 6. Rendimiento esperado
+
+Con `gpu = true`, el decodificador y el vocoder, el 95 % del cómputo, van en la GPU del móvil a través de Vulkan (`wgpu`). Si no hay un driver Vulkan con *compute* utilizable, se usa la CPU (NEON). El backend de GPU da la misma salida que la CPU (101–104 dB de SNR en nuestras pruebas), pero aún no se ha medido en teléfonos reales.
 
 El modelo puente K82 cuesta ~26 GMAC por segundo de audio. En ARM64 con 4 núcleos grandes (Snapdragon 8 Gen 2 o similares) se espera un RTF de 0,3–0,6. En móviles de 2019, alrededor de 1, como mide la investigación con Kokoro. El modelo propio **IH-1 Mobile** apunta a un RTF < 0,1 en cualquier Android; ver [ARCHITECTURE.md](ARCHITECTURE.md).

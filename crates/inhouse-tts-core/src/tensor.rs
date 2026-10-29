@@ -178,6 +178,11 @@ impl Matrix {
         }
     }
 
+    /// Compact weights, unless the matrix was pre-packed for the CPU.
+    pub fn storage(&self) -> Option<&Storage> {
+        self.storage.as_ref()
+    }
+
     /// Packs the matrix for the current kernel (or returns the cached pack).
     pub fn with_packed<R>(&self, f: impl FnOnce(&PackedA) -> R) -> R {
         match &self.packed {

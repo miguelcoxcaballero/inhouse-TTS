@@ -13,6 +13,8 @@ readme = "../../README.md"
 default = ["parallel", "embed-lexicons"]
 parallel = ["inhouse-tts-core/parallel"]
 embed-lexicons = ["inhouse-tts-text/embed-lexicons"]
+# Decoder on the GPU (WebGPU in browsers; Vulkan, Metal or DX12 natively).
+gpu = ["inhouse-tts-core/gpu"]
 
 [dependencies]
 inhouse-tts-core.workspace = true

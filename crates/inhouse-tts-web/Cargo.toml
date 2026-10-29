@@ -13,7 +13,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-inhouse-tts = { workspace = true, default-features = false }
+inhouse-tts = { workspace = true, default-features = false, features = ["gpu"] }
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

@@ -19,12 +19,31 @@ pub struct Handle {
     engine: Mutex<Engine>,
 }
 
-fn create(model: &[u8], voices: &[u8]) -> Result<Box<Handle>, String> {
-    let mut engine = Engine::new(model, LoadOptions::default()).map_err(|e| e.0)?;
+fn create(model: &[u8], voices: &[u8], gpu: bool) -> Result<Box<Handle>, String> {
+    let mut engine = load(model, gpu)?;
     engine.add_voices(voices).map_err(|e| e.0)?;
     Ok(Box::new(Handle {
         engine: Mutex::new(engine),
     }))
+}
+
+/// Loads the model; with `gpu`, moves the decoder to the GPU (Vulkan) and
+/// falls back to the CPU when no usable GPU is found.
+fn load(model: &[u8], gpu: bool) -> Result<Engine, String> {
+    #[cfg(feature = "gpu")]
+    if gpu {
+        let opts = LoadOptions {
+            gpu: true,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(model, opts).map_err(|e| e.0)?;
+        let gpu_opts = inhouse_tts::GpuOptions::default();
+        if inhouse_tts::core::gpu::block_on(engine.enable_gpu(gpu_opts)).is_ok() {
+            return Ok(engine);
+        }
+    }
+    let _ = gpu;
+    Engine::new(model, LoadOptions::default()).map_err(|e| e.0)
 }
 
 fn options(locale: &str, voice: &str, speed: f32) -> SpeakOptions {
@@ -88,21 +107,47 @@ unsafe fn handle<'a>(h: jlong) -> Option<&'a Handle> {
     (h as *const Handle).as_ref()
 }
 
-/// `static native long nativeCreate(byte[] model, byte[] voices)`
+/// `static native long nativeCreate(byte[] model, byte[] voices, boolean gpu)`
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_inhouse_tts_InhouseTts_nativeCreate(
     env: *mut JNIEnv,
     _: jclass,
     model: jbyteArray,
     voices: jbyteArray,
+    gpu: jboolean,
 ) -> jlong {
-    match create(&bytes(env, model), &bytes(env, voices)) {
+    match create(&bytes(env, model), &bytes(env, voices), gpu != 0) {
         Ok(h) => Box::into_raw(h) as jlong,
         Err(e) => {
             throw(env, &e);
             0
         }
     }
+}
+
+fn accelerator(h: &Handle) -> String {
+    h.engine.lock().map_or_else(
+        |_| "CPU".to_string(),
+        |e| {
+            e.gpu_name()
+                .map_or("CPU".to_string(), |g| format!("GPU {g}"))
+        },
+    )
+}
+
+/// `static native String nativeAccelerator(long handle)`: `"CPU"` or `"GPU <name>"`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_inhouse_tts_InhouseTts_nativeAccelerator(
+    env: *mut JNIEnv,
+    _: jclass,
+    h: jlong,
+) -> jstring {
+    let Some(h) = handle(h) else {
+        throw(env, "engine is closed");
+        return std::ptr::null_mut();
+    };
+    let c = CString::new(accelerator(h)).unwrap_or_default();
+    ((**env).NewStringUTF.unwrap())(env, c.as_ptr())
 }
 
 /// `static native void nativeDestroy(long handle)`
@@ -252,7 +297,43 @@ pub unsafe extern "C" fn ihtts_engine_new(
     }
     let m = std::slice::from_raw_parts(model, model_len);
     let v = std::slice::from_raw_parts(voices, voices_len);
-    create(m, v).map_or(std::ptr::null_mut(), Box::into_raw)
+    create(m, v, false).map_or(std::ptr::null_mut(), Box::into_raw)
+}
+
+/// Like `ihtts_engine_new`, with the decoder on the GPU when one is usable.
+#[no_mangle]
+pub unsafe extern "C" fn ihtts_engine_new_gpu(
+    model: *const u8,
+    model_len: usize,
+    voices: *const u8,
+    voices_len: usize,
+) -> *mut Handle {
+    if model.is_null() || voices.is_null() {
+        return std::ptr::null_mut();
+    }
+    let m = std::slice::from_raw_parts(model, model_len);
+    let v = std::slice::from_raw_parts(voices, voices_len);
+    create(m, v, true).map_or(std::ptr::null_mut(), Box::into_raw)
+}
+
+/// Writes `"CPU"` or `"GPU <name>"` (NUL-terminated, truncated to `len`)
+/// and returns the full length.
+#[no_mangle]
+pub unsafe extern "C" fn ihtts_accelerator(
+    h: *const Handle,
+    buf: *mut c_char,
+    len: usize,
+) -> usize {
+    let Some(h) = h.as_ref() else {
+        return 0;
+    };
+    let name = accelerator(h);
+    if !buf.is_null() && len > 0 {
+        let n = name.len().min(len - 1);
+        std::ptr::copy_nonoverlapping(name.as_ptr(), buf as *mut u8, n);
+        *buf.add(n) = 0;
+    }
+    name.len()
 }
 
 #[no_mangle]

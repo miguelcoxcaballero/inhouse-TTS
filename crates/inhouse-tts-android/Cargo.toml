@@ -13,6 +13,11 @@ publish = false
 name = "inhouse_tts_jni"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+default = ["gpu"]
+# Decoder on the phone's GPU through Vulkan (falls back to the CPU).
+gpu = ["inhouse-tts/gpu"]
+
 [dependencies]
 inhouse-tts = { workspace = true, features = ["parallel", "embed-lexicons"] }
 jni-sys = "0.3"

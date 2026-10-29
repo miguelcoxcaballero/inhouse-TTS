@@ -34,7 +34,7 @@ textarea { width: 100%; min-height: 140px; resize: vertical; border: 1px solid v
   padding: 12px 14px; font: inherit; font-size: 17px; background: var(--bg); color: var(--ink); }
 textarea:focus, select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .row { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 16px; }
-.row2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 16px; align-items: end; }
+.row2 { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 16px; margin-top: 16px; align-items: end; }
 select { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font: inherit;
   background: var(--bg); color: var(--ink); }
 .speed { display: flex; align-items: center; gap: 12px; }
@@ -84,6 +84,7 @@ footer a { color: var(--accent); }
     <div class="row2">
       <div><label id="l-speed" for="speed">Velocidad</label>
         <div class="speed"><input id="speed" type="range" min="0.6" max="1.6" step="0.05" value="1"><span id="speed-val">1.00×</span></div></div>
+      <div><label id="l-accel" for="accel">Acelerador</label><select id="accel"></select></div>
       <div><label id="l-threads" for="threads">Hilos de síntesis</label><select id="threads"></select></div>
     </div>
     <div class="actions">

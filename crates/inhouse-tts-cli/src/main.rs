@@ -26,6 +26,7 @@ OPTIONS:
       --voices FILE   voice pack (.ihw)  [env INHOUSE_TTS_VOICES, default models/voices.ihw]
       --seed N        noise seed (default 1)
       --stream        write one WAV per chunk as soon as it is ready
+      --gpu           run the decoder on the GPU (Vulkan, Metal or DX12)
 ";
 
 pub fn arg(args: &[String], name: &str) -> Option<String> {
@@ -80,11 +81,35 @@ fn load_engine(args: &[String]) -> Engine {
             "cannot read model {model}: {e} (see README: models)"
         ))
     });
-    let mut engine = Engine::new(&bytes, LoadOptions::default()).unwrap_or_else(|e| die(e));
+    let gpu = args.iter().any(|a| a == "--gpu");
+    let opts = LoadOptions {
+        gpu,
+        ..Default::default()
+    };
+    let mut engine = Engine::new(&bytes, opts).unwrap_or_else(|e| die(e));
+    if gpu {
+        enable_gpu(&mut engine);
+    }
     let vb =
         std::fs::read(&voices).unwrap_or_else(|e| die(format!("cannot read voices {voices}: {e}")));
     engine.add_voices(&vb).unwrap_or_else(|e| die(e));
     engine
+}
+
+#[cfg(feature = "gpu")]
+fn enable_gpu(engine: &mut Engine) {
+    let opts = inhouse_tts::GpuOptions {
+        allow_software: std::env::var_os("INHOUSE_TTS_SOFTWARE_GPU").is_some(),
+    };
+    match inhouse_tts::core::gpu::block_on(engine.enable_gpu(opts)) {
+        Ok(name) => eprintln!("GPU: {name}"),
+        Err(e) => eprintln!("GPU unavailable ({e}); using the CPU"),
+    }
+}
+
+#[cfg(not(feature = "gpu"))]
+fn enable_gpu(_: &mut Engine) {
+    eprintln!("this build has no GPU support; using the CPU");
 }
 
 fn speak_options(args: &[String]) -> SpeakOptions {
@@ -213,10 +238,16 @@ fn main() {
             let audio = engine.speak(&text, &opts).unwrap_or_else(|e| die(e));
             let el = t.elapsed().as_secs_f64();
             let secs = audio.len() as f64 / SAMPLE_RATE as f64;
+            let device = match engine.gpu_name() {
+                Some(g) => format!("GPU {g}"),
+                None => format!(
+                    "{} threads, kernel {}",
+                    inhouse_tts::core::par::num_threads(),
+                    inhouse_tts::core::gemm::kernel().name
+                ),
+            };
             println!(
-                "{} threads, kernel {}: {secs:.2}s audio in {el:.2}s → RTF {:.3} ({:.1}x real time)",
-                inhouse_tts::core::par::num_threads(),
-                inhouse_tts::core::gemm::kernel().name,
+                "{device}: {secs:.2}s audio in {el:.2}s → RTF {:.3} ({:.1}x real time)",
                 el / secs,
                 secs / el
             );

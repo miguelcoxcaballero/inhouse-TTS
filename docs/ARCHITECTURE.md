@@ -53,6 +53,14 @@ flowchart LR
 - **Aproximaciones vectorizables** de sin, exp, tanh y GELU, sin funciones de libm en los bucles calientes.
 - **STFT/iSTFT** con la semántica exacta de PyTorch (`center=True`, Hann periódica) y fuente armónica hn-NSF con la fase en f64.
 - **Pesos en `.ihw`**: cabecera JSON y datos alineados a 64 bytes, en f32, f16 o **int8 por fila**. En nativo se preempaquetan para el micro-kernel; en la web quedan compactos (q8/f16) y se desempaquetan en cada llamada.
+- **Backend de GPU** (feature `gpu`, sobre `wgpu`): WebGPU en el navegador, y Vulkan, Metal o DX12 en escritorio y Android. El decodificador y el generador de K82, el 95 % del cómputo, se ejecutan como una lista de lanzamientos de kernels:
+  - **convolución como GEMM implícita** en *tiles* de 64×64×16 que lee los pesos int8, f16 o f32 sin desempaquetarlos antes; la escala por fila se aplica al final;
+  - la misma convolución evalúa las **convoluciones transpuestas polifásicas**, con una fase por `workgroup_id.z`, la *reflection pad* y la suma residual fusionadas;
+  - **AdaIN con LeakyReLU o Snake fusionados**: un *workgroup* por canal, con media y varianza en dos pasadas. Usa el mismo `sin` polinómico que la CPU;
+  - un *pool* de buffers por clases de tamaño y subidas ordenadas con copias, todo en un único *command buffer*;
+  - la parte inicial del modelo (ALBERT, LSTMs, fuente armónica) y la iSTFT se quedan en la CPU.
+
+  Los kernels son WGSL embebido en el crate; el resto es Rust. Salida idéntica a la CPU: **101–104 dB** de SNR en nativo y **85,7 dB** en Chromium, que es el límite del PCM de 16 bits.
 - **Conversión desde PyTorch en Rust**: lector de zip y *unpickler* restringido. Nunca ejecuta código del checkpoint; los *globals* desconocidos quedan como valores opacos. Pliega la *weight norm*, suma los sesgos de las LSTM y reordena las convoluciones transpuestas en fases.
 
 ### 3.2 El modelo puente K82
@@ -70,7 +78,7 @@ fonemas → codificador de texto (3 conv + BiLSTM)
 ```
 
 - Validación: 106–131 dB de SNR por etapa frente a la referencia, y duraciones idénticas. Ver [RESEARCH.md §7](RESEARCH.md#7-medidas-propias-de-inhouse-tts).
-- Coste: ~26 GMAC por segundo de audio, el 95 % en el generador. Va en tiempo real en PC (RTF 0,5 con 4 hilos), pero no en WASM con un solo hilo (RTF ~4).
+- Coste: ~26 GMAC por segundo de audio, el 95 % en el generador. Va en tiempo real en PC (RTF 0,5 con 4 hilos), pero no en WASM con un solo hilo (RTF ~4). Por eso el decodificador también corre en la GPU (WebGPU, Vulkan, Metal, DX12).
 
 ### 3.3 Front-end y acentos
 
@@ -99,10 +107,14 @@ fonemas → codificador de texto (3 conv + BiLSTM)
 
 ### 3.4 Web
 
-Un único módulo WASM (1,6 MB, SIMD128) cumple dos papeles:
+Un único módulo WASM (0,9 MB con SIMD128 y WebGPU) cumple dos papeles:
 
 - **Página**: la interfaz con `web-sys`, la fonetización y el reparto de fragmentos entre *N workers*. La reproducción es continua: los `AudioBufferSourceNode` se encadenan sin huecos.
 - **Worker**: descarga el modelo una vez, en 3 partes de 40 MB guardadas en la **Cache API** para que funcione sin conexión, y sintetiza fragmentos que devuelve como `Float32Array` transferibles.
+- **Acelerador** (selector en la página y `?accel=gpu|cpu` en la URL):
+  - en modo automático, el primer worker abre **WebGPU** y, si hay una GPU real, lleva todo el decodificador a la GPU con un solo worker;
+  - los adaptadores por software (SwiftShader) se descartan, y entonces se usan *N workers* de CPU con WASM SIMD;
+  - si la GPU falla en mitad de una frase, ese worker sigue en la CPU.
 
 El JavaScript se limita a dos líneas de arranque por contexto.
 
@@ -239,7 +251,7 @@ Como referencia, K82 cuesta **53 GFLOP por segundo de audio**. IH-1 Base es unas
 
 ### 4.7 Motor: evolución
 
-1. **WebGPU/wgpu** para las convoluciones del decodificador de K82 y la atención de IH-1 en navegadores y GPUs de escritorio y móviles (Vulkan, Metal, DX12), escrito en Rust (`wgpu` y kernels WGSL o CubeCL).
+1. ✅ **WebGPU/wgpu** para el decodificador de K82 (hecho; ver §3.1). Falta medirlo en GPUs reales y ajustar los *tiles*, añadir la atención de IH-1 y, quizá, ALBERT.
 2. **int8 de verdad**: kernels VNNI (x86), SDOT/I8MM (ARM) y *relaxed SIMD* (WASM), solo donde se mida una mejora.
 3. **Hilos en WASM** con `coi-serviceworker`, para lograr el aislamiento de origen en GitHub Pages.
 4. AVX-512 y fusión de AdaIN y Snake en una sola pasada de memoria.
@@ -249,7 +261,7 @@ Como referencia, K82 cuesta **53 GFLOP por segundo de audio**. IH-1 Base es unas
 | Fase | Entregable | Criterio de éxito |
 |---|---|---|
 | **0 (hecho)** | motor Rust propio, K82, front-end con 13 acentos, CLI, web en Pages, biblioteca Android | paridad numérica con la referencia y demo pública |
-| 1 | WebGPU y AVX-512 en el motor; pt-BR/pt-PT, fr-FR/fr-CA, it-IT y hi-IN en el front-end | RTF < 1 en el navegador de escritorio; 18 *locales* |
+| 1 | WebGPU en el motor (hecho), AVX-512; pt-BR/pt-PT, fr-FR/fr-CA, it-IT y hi-IN en el front-end | RTF < 1 en el navegador de escritorio; 18 *locales* |
 | 2 | ingesta de datos e IH-Codec en Rust | reconstrucción con PESQ > 3,5 y decodificador destilado a 1–3M |
 | 3 | IH-1 Teacher en inglés y español con acentos | WER < 2 %, accent-ID > 85 %, calidad ≥ K82 |
 | 4 | IH-1 Base y Mobile destilados y cuantizados | RTF < 0,2 en Android de gama media, < 0,1 en WASM, primer audio < 100 ms |

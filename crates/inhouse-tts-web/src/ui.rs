@@ -26,6 +26,17 @@ struct Slot {
     busy: bool,
 }
 
+/// What the first worker found out about WebGPU.
+#[derive(Clone, PartialEq)]
+enum Gpu {
+    /// Still probing (only worker 0 runs meanwhile).
+    Unknown,
+    /// Decoder on this adapter: a single worker is enough.
+    On(String),
+    /// No usable GPU: one CPU worker per spare core.
+    Off,
+}
+
 struct Ui {
     text: HtmlTextAreaElement,
     locale: HtmlSelectElement,
@@ -33,6 +44,7 @@ struct Ui {
     speed: HtmlInputElement,
     speed_val: Element,
     threads: HtmlSelectElement,
+    accel: HtmlSelectElement,
     speak: HtmlButtonElement,
     stop: HtmlButtonElement,
     download: HtmlButtonElement,
@@ -49,6 +61,7 @@ struct App {
     manifest: JsValue,
     cache: String,
     slots: Vec<Slot>,
+    gpu: Gpu,
     frontend: Frontend,
     lexicons: HashSet<String>,
     last_sample: String,
@@ -110,6 +123,7 @@ pub fn start() -> Result<(), JsValue> {
         speed: el("speed")?,
         speed_val: el("speed-val")?,
         threads: el("threads")?,
+        accel: el("accel")?,
         speak: el("speak")?,
         stop: el("stop")?,
         download: el("download")?,
@@ -127,6 +141,7 @@ pub fn start() -> Result<(), JsValue> {
         ("l-voice", s.voice),
         ("l-speed", s.speed),
         ("l-threads", s.threads),
+        ("l-accel", s.accel),
         ("l-phonemes", s.phonemes),
         ("offline", s.offline),
         ("about", s.about),
@@ -161,6 +176,20 @@ pub fn start() -> Result<(), JsValue> {
         ui.threads.append_child(&o)?;
     }
     ui.threads.set_value(&default_threads.to_string());
+    for (value, label) in [
+        ("auto", s.accel_auto),
+        ("gpu", s.accel_gpu),
+        ("cpu", s.accel_cpu),
+    ] {
+        let o = HtmlOptionElement::new_with_text_and_value(label, value)?;
+        ui.accel.append_child(&o)?;
+    }
+    let search = window.location().search().unwrap_or_default();
+    let accel = ["gpu", "cpu"]
+        .into_iter()
+        .find(|m| search.contains(&format!("accel={m}")))
+        .unwrap_or("auto");
+    ui.accel.set_value(accel);
 
     let app = App {
         s,
@@ -168,6 +197,7 @@ pub fn start() -> Result<(), JsValue> {
         manifest: JsValue::UNDEFINED,
         cache: String::new(),
         slots: Vec::new(),
+        gpu: Gpu::Unknown,
         frontend: Frontend::new(),
         lexicons: HashSet::new(),
         last_sample: String::new(),
@@ -217,6 +247,9 @@ pub fn start() -> Result<(), JsValue> {
         });
         on(a.ui.threads.as_ref(), "change", |_| {
             with_app(App::ensure_workers);
+        });
+        on(a.ui.accel.as_ref(), "change", |_| {
+            with_app(App::restart_workers);
         });
         on(a.ui.text.as_ref(), "keydown", |e| {
             let ke: &web_sys::KeyboardEvent = e.unchecked_ref();
@@ -361,7 +394,12 @@ impl App {
         if self.manifest.is_undefined() {
             return;
         }
-        let want: usize = self.ui.threads.value().parse().unwrap_or(1);
+        let threads: usize = self.ui.threads.value().parse().unwrap_or(1);
+        let want = match (&self.gpu, self.ui.accel.value().as_str()) {
+            (_, "cpu") | (Gpu::Off, _) => threads,
+            _ => 1,
+        };
+        self.ui.threads.set_disabled(matches!(self.gpu, Gpu::On(_)));
         while self.slots.len() < want {
             let index = self.slots.len();
             let opts = WorkerOptions::new();
@@ -392,11 +430,29 @@ impl App {
         }
     }
 
+    /// Terminates every worker and starts again (accelerator changed).
+    fn restart_workers(&mut self) {
+        self.stop();
+        for s in self.slots.drain(..) {
+            s.worker.terminate();
+        }
+        self.gpu = Gpu::Unknown;
+        self.ui.speak.set_disabled(true);
+        self.set_status(self.s.preparing);
+        self.ensure_workers();
+    }
+
     /// Sends the model location to a worker once its module has booted
     /// (messages posted earlier would be lost while it instantiates).
     fn init_worker(&self, index: usize) {
         let Some(slot) = self.slots.get(index) else {
             return;
+        };
+        let gpu = match (self.ui.accel.value().as_str(), &self.gpu) {
+            ("cpu", _) | (_, Gpu::Off) => "off",
+            _ if index > 0 => "off",
+            ("gpu", _) => "force",
+            _ => "auto",
         };
         let model = get(&self.manifest, "model");
         let msg = obj(&[
@@ -406,6 +462,7 @@ impl App {
             ("files", get(&model, "files")),
             ("bytes", get(&model, "bytes")),
             ("report", (index == 0).into()),
+            ("gpu", gpu.into()),
         ]);
         let _ = slot.worker.post_message(&msg);
     }
@@ -438,15 +495,36 @@ impl App {
                     let _ = self.ui.bar_wrap.style().set_property("display", "none");
                     self.ui.speak.set_disabled(false);
                     self.set_status(self.s.ready);
+                    let gpu = get_str(&d, "gpu");
+                    let gpu_error = get_str(&d, "gpu_error");
+                    self.gpu = if gpu.is_empty() {
+                        Gpu::Off
+                    } else {
+                        Gpu::On(gpu.clone())
+                    };
+                    let device = if gpu.is_empty() {
+                        let mut t = format!("CPU · {}", get_str(&d, "kernel"));
+                        if !gpu_error.is_empty() {
+                            web_sys::console::info_1(&format!("WebGPU: {gpu_error}").into());
+                            if self.ui.accel.value() == "gpu" {
+                                t = format!("{t} · WebGPU: {gpu_error}");
+                            }
+                        }
+                        t
+                    } else if gpu == "WebGPU" {
+                        gpu
+                    } else {
+                        format!("WebGPU · {gpu}")
+                    };
                     set_text(
                         &self.ui.metrics,
                         &format!(
-                            "{} · {:.1} s + {:.1} s",
-                            get_str(&d, "kernel"),
+                            "{device} · {:.1} s + {:.1} s",
                             get_f64(&d, "download_ms") / 1e3,
-                            get_f64(&d, "parse_ms") / 1e3
+                            (get_f64(&d, "parse_ms") + get_f64(&d, "gpu_ms")) / 1e3
                         ),
                     );
+                    self.ensure_workers();
                 }
                 self.dispatch();
             }
@@ -468,6 +546,12 @@ impl App {
                     s.busy = false;
                 }
                 self.show_error(&get(&d, "message"));
+            }
+            "gpu_lost" => {
+                web_sys::console::warn_1(&get(&d, "message"));
+                self.set_status(self.s.gpu_fallback);
+                self.gpu = Gpu::Off;
+                self.ensure_workers();
             }
             _ => {}
         }

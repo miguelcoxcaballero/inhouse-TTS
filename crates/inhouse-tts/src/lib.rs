@@ -20,6 +20,10 @@
 pub use inhouse_tts_core as core;
 pub use inhouse_tts_text as text;
 
+#[cfg(feature = "gpu")]
+pub use inhouse_tts_core::gpu::GpuOptions;
+#[cfg(feature = "gpu")]
+use inhouse_tts_core::model::k82::gpu::K82Gpu;
 use inhouse_tts_core::model::k82::{
     InferOptions, LoadOptions, K82, MAX_TOKENS, SAMPLES_PER_FRAME, SAMPLE_RATE as SR,
 };
@@ -171,6 +175,8 @@ pub struct Engine {
     model: K82,
     voices: BTreeMap<String, Voice>,
     frontend: Frontend,
+    #[cfg(feature = "gpu")]
+    gpu: Option<K82Gpu>,
 }
 
 impl Engine {
@@ -181,7 +187,35 @@ impl Engine {
             model,
             voices: BTreeMap::new(),
             frontend: Frontend::new(),
+            #[cfg(feature = "gpu")]
+            gpu: None,
         })
+    }
+
+    /// Moves the decoder and vocoder to the GPU and returns the adapter
+    /// name. The model must be loaded with `LoadOptions { gpu: true, .. }`.
+    #[cfg(feature = "gpu")]
+    pub async fn enable_gpu(&mut self, opts: GpuOptions) -> Result<String> {
+        let gpu = inhouse_tts_core::gpu::Gpu::new(opts).await.map_err(Error)?;
+        let g = K82Gpu::new(gpu, &self.model).map_err(Error)?;
+        let name = g.name().to_string();
+        self.gpu = Some(g);
+        Ok(name)
+    }
+
+    /// Goes back to CPU-only synthesis.
+    #[cfg(feature = "gpu")]
+    pub fn disable_gpu(&mut self) {
+        self.gpu = None;
+    }
+
+    /// Name of the GPU in use, if any.
+    pub fn gpu_name(&self) -> Option<&str> {
+        #[cfg(feature = "gpu")]
+        if let Some(g) = &self.gpu {
+            return Some(g.name());
+        }
+        None
     }
 
     /// Adds every voice of a `.ihw` voice container; returns how many.
@@ -265,42 +299,50 @@ impl Engine {
         Ok(chunk_phonemes(&ps, opts.plan))
     }
 
-    /// Synthesises one phoneme chunk (≤ 510 symbols).
-    pub fn synth_phonemes(&self, phonemes: &str, voice: &Voice, opts: &SpeakOptions) -> Vec<f32> {
+    fn ids(&self, phonemes: &str) -> Vec<u32> {
         let ids = self.model.tokenize(phonemes);
-        let ids = if ids.len() > MAX_TOKENS + 2 {
+        if ids.len() > MAX_TOKENS + 2 {
             [&ids[..MAX_TOKENS + 1], &[0]].concat()
         } else {
             ids
-        };
-        let style = voice.style(ids.len() - 2);
-        let out = self.model.infer(
-            &ids,
-            style,
-            InferOptions {
-                speed: opts.speed,
-                seed: Some(opts.seed),
-            },
-        );
-        if !opts.trim_silence || out.durations.len() < 3 {
-            return out.audio;
         }
-        // Keep 50 ms of the leading pad and 100 ms of the trailing pad.
-        let lead = (out.durations[0] * SAMPLES_PER_FRAME).saturating_sub(1200);
-        let tail =
-            (out.durations[out.durations.len() - 1] * SAMPLES_PER_FRAME).saturating_sub(2400);
-        let end = out.audio.len().saturating_sub(tail).max(lead);
-        let mut audio = out.audio[lead..end].to_vec();
-        let pause_ms = if phonemes.trim_end().ends_with(['.', '!', '?', '…']) {
-            180
-        } else {
-            60
+    }
+
+    /// Synthesises one phoneme chunk (≤ 510 symbols). Natively the decoder
+    /// runs on the GPU when [`Engine::enable_gpu`] succeeded.
+    pub fn synth_phonemes(&self, phonemes: &str, voice: &Voice, opts: &SpeakOptions) -> Vec<f32> {
+        let ids = self.ids(phonemes);
+        let style = voice.style(ids.len() - 2);
+        let inp = self.model.prepare(&ids, style, infer_options(opts));
+        #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
+        if let Some(g) = &self.gpu {
+            match inhouse_tts_core::gpu::block_on(g.decode(&self.model, &inp, style)) {
+                Ok(audio) => return finish(audio, &inp.durations, phonemes, opts),
+                Err(e) => eprintln!("GPU decoder failed ({e}); using the CPU"),
+            }
+        }
+        let audio = self.model.decode(&inp, style);
+        finish(audio, &inp.durations, phonemes, opts)
+    }
+
+    /// Like [`Engine::synth_phonemes`], but awaits the GPU instead of
+    /// blocking (required in the browser). Fails if the GPU fails, so the
+    /// caller can fall back with [`Engine::disable_gpu`].
+    #[cfg(feature = "gpu")]
+    pub async fn synth_phonemes_async(
+        &self,
+        phonemes: &str,
+        voice: &Voice,
+        opts: &SpeakOptions,
+    ) -> Result<Vec<f32>> {
+        let ids = self.ids(phonemes);
+        let style = voice.style(ids.len() - 2);
+        let inp = self.model.prepare(&ids, style, infer_options(opts));
+        let audio = match &self.gpu {
+            Some(g) => g.decode(&self.model, &inp, style).await.map_err(Error)?,
+            None => self.model.decode(&inp, style),
         };
-        audio.extend(std::iter::repeat_n(
-            0.0,
-            SAMPLE_RATE as usize * pause_ms / 1000,
-        ));
-        audio
+        Ok(finish(audio, &inp.durations, phonemes, opts))
     }
 
     /// Synthesises a whole text.
@@ -333,4 +375,33 @@ impl Engine {
                 })
             }))
     }
+}
+
+fn infer_options(opts: &SpeakOptions) -> InferOptions {
+    InferOptions {
+        speed: opts.speed,
+        seed: Some(opts.seed),
+    }
+}
+
+/// Trims the model's leading/trailing silence (keeping 50 ms / 100 ms) and
+/// appends a punctuation pause.
+fn finish(audio: Vec<f32>, durations: &[usize], phonemes: &str, opts: &SpeakOptions) -> Vec<f32> {
+    if !opts.trim_silence || durations.len() < 3 {
+        return audio;
+    }
+    let lead = (durations[0] * SAMPLES_PER_FRAME).saturating_sub(1200);
+    let tail = (durations[durations.len() - 1] * SAMPLES_PER_FRAME).saturating_sub(2400);
+    let end = audio.len().saturating_sub(tail).max(lead);
+    let mut out = audio[lead..end].to_vec();
+    let pause_ms = if phonemes.trim_end().ends_with(['.', '!', '?', '…']) {
+        180
+    } else {
+        60
+    };
+    out.extend(std::iter::repeat_n(
+        0.0,
+        SAMPLE_RATE as usize * pause_ms / 1000,
+    ));
+    out
 }

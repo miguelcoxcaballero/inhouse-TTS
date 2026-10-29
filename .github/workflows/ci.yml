@@ -17,6 +17,8 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Software Vulkan driver for the GPU tests
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
       - run: cargo fmt --all --check
       - run: cargo test --workspace --release
 

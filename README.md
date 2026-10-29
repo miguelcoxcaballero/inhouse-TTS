@@ -10,7 +10,8 @@
 | 🦀 **Todo en Rust** | motor neuronal propio (GEMM SIMD, convoluciones, LSTM, atención, vocoder iSTFT), front-end de texto, interfaz web (WASM), biblioteca Android (JNI), CLI y herramientas de build. Sin C/C++, sin ONNX Runtime, sin espeak (GPL) |
 | 🌍 **13 acentos** | español de España, México, Argentina, Colombia, Chile, Perú, Venezuela, Caribe, Puerto Rico, Andalucía y Canarias, e inglés de EE. UU. y Reino Unido |
 | ⚡ **Local y en streaming** | el audio empieza con la primera frase; RTF ≈ 0,45 en un PC de 4 núcleos; funciona sin conexión |
-| 📱 **Cualquier dispositivo** | x86-64 (AVX2/FMA, SSE2), ARM64/Android (NEON), navegador (WebAssembly SIMD128) |
+| 🎮 **GPU** | WebGPU en el navegador, y Vulkan, Metal o DX12 en nativo y Android (`wgpu`). Salida idéntica a la CPU (101–104 dB) |
+| 📱 **Cualquier dispositivo** | x86-64 (AVX2/FMA, SSE2), ARM64/Android (NEON), navegador (WebAssembly SIMD128 o WebGPU) |
 | 🔓 **Open source** | código Apache-2.0 / MIT; voces puente con pesos Apache-2.0 |
 
 ## Ejemplos
@@ -59,7 +60,11 @@ cargo xtask models --kokoro ruta/Kokoro-82M --out models
 ./target/release/inhouse-tts phonemize -l es-CU "Estoy cansado, vamos a la playa."
 ```
 
-`inhouse-tts locales` lista los acentos, `voices` las voces y `bench` mide la velocidad.
+`inhouse-tts locales` lista los acentos, `voices` las voces y `bench` mide la velocidad. Con `--gpu`, el decodificador va en la GPU (Vulkan, Metal o DX12) y, si no hay una GPU real, se queda en la CPU.
+
+```bash
+./target/release/inhouse-tts bench --gpu -l es-ES
+```
 
 ## Como biblioteca (Rust)
 
@@ -78,7 +83,7 @@ for chunk in tts.stream("Hola, ¿qué tal? Esto es Inhouse TTS.", &opts)? {
 ## Android, web y otros
 
 - **Android**: biblioteca JNI con streaming por *callback* para `AudioTrack` y C ABI. Ver [docs/ANDROID.md](docs/ANDROID.md). CI publica los `.so` de arm64-v8a, armeabi-v7a y x86_64.
-- **Web**: `cargo xtask web --kokoro ruta/Kokoro-82M` genera el sitio en `web/dist` y `cargo xtask serve` lo sirve en local. La interfaz y el *worker* de síntesis son Rust compilado a WASM; el JavaScript son dos líneas de arranque.
+- **Web**: `cargo xtask web --kokoro ruta/Kokoro-82M` genera el sitio en `web/dist` y `cargo xtask serve` lo sirve en local. La interfaz y el *worker* de síntesis son Rust compilado a WASM; el JavaScript son dos líneas de arranque. El selector **Acelerador** usa WebGPU cuando hay una GPU real y, si no, WebAssembly SIMD en varios *workers*; también se puede forzar con `?accel=gpu` o `?accel=cpu`.
 
 ## Arquitectura
 
@@ -93,6 +98,7 @@ texto → normalización → G2P + reglas de acento → troceado → modelo acú
   - Convoluciones con im2col virtual y convoluciones transpuestas polifásicas.
   - LSTM, ALBERT, AdaIN y Snake; STFT/iSTFT con semántica de PyTorch.
   - Pesos f32/f16/int8 en el formato propio `.ihw` y conversor seguro de checkpoints PyTorch (sin ejecutar pickle).
+  - **Backend de GPU** con `wgpu`: convolución como GEMM implícita sobre los pesos int8, AdaIN con Snake fusionado y convolución transpuesta polifásica. Kernels WGSL embebidos en Rust.
 - **Modelo puente K82**: StyleTTS2 + iSTFTNet, compatible con los pesos Apache-2.0 de Kokoro-82M. **Reproduce la referencia con 106–131 dB de SNR** en cada etapa.
 - **Modelo propio IH-1**, en planificación: latentes continuos a 12,5 Hz, fonemas con *tokens* de acento y voz disociada del acento, entrenado en Rust (burn). Unas 40× menos cómputo que K82, para tiempo real en cualquier móvil y en WASM.
 
@@ -109,15 +115,17 @@ Documentación:
 | Nativo, AVX2+FMA, 4 hilos | **0,42–0,51** |
 | Nativo, 1 hilo | 1,3 |
 | Navegador, WASM SIMD128 | ~4 por *worker* (el sitio usa varios *workers*) |
+| Navegador o nativo con GPU (WebGPU, Vulkan, Metal) | estimado 0,05–0,15 en GPUs integradas; **sin medir en hardware real** (este entorno no tiene GPU) |
 
-El 88 % del cómputo es el vocoder iSTFTNet, ~25 GMAC por segundo de audio. Las mejoras previstas son WebGPU en el motor y el modelo IH-1. Detalles en [docs/RESEARCH.md §7](docs/RESEARCH.md#7-medidas-propias-de-inhouse-tts).
+El 88 % del cómputo es el vocoder iSTFTNet, ~25 GMAC por segundo de audio, y por eso va en la GPU cuando la hay. El siguiente salto será el modelo IH-1. Detalles en [docs/RESEARCH.md §7](docs/RESEARCH.md#7-medidas-propias-de-inhouse-tts).
 
 ## Hoja de ruta
 
 - [x] Motor neuronal propio en Rust (x86-64, ARM64, WASM), validado frente a la referencia
 - [x] Front-end propio sin GPL: español (11 acentos) e inglés (US/GB)
 - [x] CLI, API con streaming, web en GitHub Pages, biblioteca Android
-- [ ] WebGPU (wgpu) para el vocoder; AVX-512; hilos en WASM
+- [x] GPU con `wgpu` (WebGPU, Vulkan, Metal, DX12) para el decodificador y el vocoder
+- [ ] AVX-512; hilos en WASM; medir y ajustar los kernels en GPUs reales
 - [ ] Portugués (BR/PT), francés (FR/CA), italiano e hindi en el front-end
 - [ ] IH-Codec e IH-1 entrenados en Rust con datos permisivos y destilados a 8–30M parámetros
 

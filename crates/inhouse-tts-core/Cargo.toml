@@ -14,8 +14,16 @@ default = ["parallel"]
 parallel = ["dep:rayon"]
 # Reader for PyTorch .pth/.pt checkpoints (zip + pickle) used by the converter.
 convert = []
+# GPU backend (wgpu: WebGPU in the browser; Vulkan, Metal or DX12 natively).
+gpu = ["dep:wgpu"]
 
 [dependencies]
 rayon = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30", optional = true, default-features = false, features = ["std", "webgpu", "wgsl"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30", optional = true, default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan", "metal", "dx12"] }

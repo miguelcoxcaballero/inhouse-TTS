@@ -235,6 +235,60 @@ pub fn run(args: &[String]) -> bool {
             std::fs::write(&out, dsp::wav_bytes(&o.audio, 24000)).unwrap();
             let _ = vf.take(&voice);
         }
+        #[cfg(feature = "gpu")]
+        Some("gpu-check") => {
+            // Runs the decoder on the CPU and on the GPU from the same front
+            // output and compares them.
+            use inhouse_tts_core::gpu::{block_on, Gpu, GpuOptions};
+            use inhouse_tts_core::model::k82::gpu::K82Gpu;
+            let model = arg(&args, "--model").expect("--model");
+            let voices = arg(&args, "--voices").expect("--voices");
+            let voice = arg(&args, "--voice").expect("--voice");
+            let ph = arg(&args, "--ph").expect("--ph");
+            let m = K82::load(
+                WeightFile::parse(&std::fs::read(&model).unwrap()).unwrap(),
+                LoadOptions {
+                    gpu: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut vf = WeightFile::parse(&std::fs::read(&voices).unwrap()).unwrap();
+            let pack = vf.get(&voice).unwrap().to_f32();
+            let n = ph.chars().count();
+            let style = &pack[(n - 1).min(pack.len() / 256 - 1) * 256..][..256];
+            let t = Instant::now();
+            let gpu = block_on(Gpu::new(GpuOptions {
+                allow_software: true,
+            }))
+            .unwrap();
+            let g = K82Gpu::new(gpu, &m).unwrap();
+            println!("GPU {} ready in {:?}", g.name(), t.elapsed());
+            let ids = m.tokenize(&ph);
+            let opts = InferOptions {
+                speed: 1.0,
+                seed: Some(1),
+            };
+            let t = Instant::now();
+            let inp = m.prepare(&ids, style, opts);
+            println!("front (CPU): {:?}", t.elapsed());
+            let t = Instant::now();
+            let cpu = m.decode(&inp, style);
+            let dur = cpu.len() as f64 / 24000.0;
+            let el = t.elapsed().as_secs_f64();
+            println!("decoder CPU: {el:.3}s for {dur:.2}s (RTF {:.3})", el / dur);
+            for run in 0..2 {
+                let t = Instant::now();
+                let gpu = block_on(g.decode(&m, &inp, style)).unwrap();
+                let el = t.elapsed().as_secs_f64();
+                println!("decoder GPU run {run}: {el:.3}s (RTF {:.3})", el / dur);
+                cmp("gpu vs cpu", &gpu, &cpu);
+                if let (0, Some(out)) = (run, arg(&args, "--out")) {
+                    std::fs::write(&out, dsp::wav_bytes(&gpu, 24000)).unwrap();
+                }
+            }
+            let _ = vf.take(&voice);
+        }
         Some("build-lexicon") => {
             // Merges misaki gold + silver JSON lexicons into the compact
             // `.lex` text format: `word\tphonemes` or

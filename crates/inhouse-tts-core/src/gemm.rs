@@ -957,7 +957,7 @@ mod tests {
 
     #[test]
     fn half_roundtrip() {
-        for &v in &[0.0f32, 1.0, -2.5, 65504.0, 1e-5, -3.14159, 6.1e-5, 1e-7] {
+        for &v in &[0.0f32, 1.0, -2.5, 65504.0, 1e-5, -3.0517, 6.1e-5, 1e-7] {
             let h = f32_to_f16(v);
             let back = f16_to_f32(h);
             assert!((back - v).abs() <= v.abs() * 1e-3 + 1e-7, "{v} -> {back}");
