@@ -1,0 +1,21 @@
+[package]
+name = "inhouse-tts-core"
+description = "Inhouse TTS neural inference engine: SIMD GEMM, convolutions, LSTM, attention, iSTFT vocoder, weight format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["parallel"]
+# Multi-threaded kernels through rayon (native targets).
+parallel = ["dep:rayon"]
+# Reader for PyTorch .pth/.pt checkpoints (zip + pickle) used by the converter.
+convert = []
+
+[dependencies]
+rayon = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true

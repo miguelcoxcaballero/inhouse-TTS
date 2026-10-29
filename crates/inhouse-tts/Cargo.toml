@@ -1,0 +1,19 @@
+[package]
+name = "inhouse-tts"
+description = "Inhouse TTS: local, real-time, multilingual text-to-speech with regional accents, written entirely in Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+
+[features]
+default = ["parallel", "embed-lexicons"]
+parallel = ["inhouse-tts-core/parallel"]
+embed-lexicons = ["inhouse-tts-text/embed-lexicons"]
+
+[dependencies]
+inhouse-tts-core.workspace = true
+inhouse-tts-text = { workspace = true, default-features = false }

@@ -1,0 +1,16 @@
+[package]
+name = "inhouse-tts-text"
+description = "Inhouse TTS text front end: normalisation, multilingual G2P and regional accents (pure Rust)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[features]
+default = ["embed-lexicons"]
+# Compile the English lexicons (~9.5 MB of text) into the binary.
+embed-lexicons = []

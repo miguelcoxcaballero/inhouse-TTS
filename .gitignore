@@ -1,0 +1,7 @@
+/target
+/models
+/web/dist
+*.ihw
+*.pth
+*.pt
+/out*.wav

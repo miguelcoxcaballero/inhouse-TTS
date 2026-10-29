@@ -1,0 +1,18 @@
+Inhouse TTS
+Copyright 2026 Inhouse TTS contributors
+Licensed under the Apache License 2.0 or the MIT license, at your option.
+
+Third-party material
+--------------------
+
+* K82 bootstrap voice model: the weights and voice packs are converted from
+  Kokoro-82M v1.0 by hexgrad (https://huggingface.co/hexgrad/Kokoro-82M),
+  released under the Apache License 2.0. Inhouse TTS does not redistribute
+  them in this repository; the build downloads and converts them.
+
+* English pronunciation lexicons in crates/inhouse-tts-text/data/ are derived
+  from the misaki gold and silver dictionaries by hexgrad
+  (https://github.com/hexgrad/misaki), Apache License 2.0. They were merged
+  and re-encoded in the `.lex` text format; the pronunciations are unchanged.
+
+No GPL code (e.g. espeak-ng) is used or linked by Inhouse TTS.

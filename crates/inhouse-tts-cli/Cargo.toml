@@ -1,0 +1,19 @@
+[package]
+name = "inhouse-tts-cli"
+description = "Command line interface of Inhouse TTS: synthesis, streaming, weight conversion and benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "inhouse-tts"
+path = "src/main.rs"
+
+[dependencies]
+inhouse-tts-core = { workspace = true, features = ["parallel", "convert"] }
+inhouse-tts-text = { workspace = true, features = ["embed-lexicons"] }
+inhouse-tts = { workspace = true, features = ["parallel", "embed-lexicons"] }
+serde_json.workspace = true
