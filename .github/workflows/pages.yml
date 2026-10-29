@@ -1,0 +1,77 @@
+name: Web demo (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  WASM_BINDGEN_VERSION: 0.2.129
+  # Pinned Kokoro-82M v1.0 revision (Apache-2.0) used for the bootstrap voices.
+  KOKORO_REV: f3ff3571791e39611d31c381e3a41a3af07b4987
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache wasm-bindgen CLI
+        id: wbg
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-${{ env.WASM_BINDGEN_VERSION }}
+      - name: Install wasm-bindgen CLI
+        if: steps.wbg.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version ${{ env.WASM_BINDGEN_VERSION }} --locked
+      - name: Cache Kokoro-82M checkpoint
+        id: kokoro
+        uses: actions/cache@v4
+        with:
+          path: kokoro
+          key: kokoro-${{ env.KOKORO_REV }}-v2
+      - name: Download Kokoro-82M (Apache-2.0)
+        if: steps.kokoro.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          base="https://huggingface.co/hexgrad/Kokoro-82M/resolve/${KOKORO_REV}"
+          mkdir -p kokoro/voices
+          curl -fsSL --retry 5 -o kokoro/config.json "$base/config.json"
+          curl -fsSL --retry 5 -o kokoro/kokoro-v1_0.pth "$base/kokoro-v1_0.pth"
+          for v in af_alloy af_aoede af_bella af_heart af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky \
+                   am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa \
+                   bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis \
+                   ef_dora em_alex em_santa ff_siwis hf_alpha hf_beta hm_omega hm_psi if_sara im_nicola \
+                   pf_dora pm_alex pm_santa; do
+            curl -fsSL --retry 5 -o "kokoro/voices/$v.pt" "$base/voices/$v.pt"
+          done
+      - name: Build the site (Rust → WebAssembly, model conversion)
+        run: cargo xtask web --kokoro kokoro --out web/dist
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

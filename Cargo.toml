@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/inhouse-tts-core", "crates/inhouse-tts-text", "crates/inhouse-tts", "crates/inhouse-tts-cli"]
+members = ["crates/inhouse-tts-core", "crates/inhouse-tts-text", "crates/inhouse-tts", "crates/inhouse-tts-cli", "crates/inhouse-tts-web", "crates/inhouse-tts-android", "crates/xtask"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,18 @@
+[package]
+name = "inhouse-tts-android"
+description = "Inhouse TTS native library for Android (JNI) and other hosts (C ABI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "inhouse_tts_jni"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+inhouse-tts = { workspace = true, features = ["parallel", "embed-lexicons"] }
+jni-sys = "0.3"

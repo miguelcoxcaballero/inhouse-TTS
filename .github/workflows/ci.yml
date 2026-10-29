@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests (x86-64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --release
+
+  wasm:
+    name: WebAssembly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target wasm32-unknown-unknown -p inhouse-tts-web
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+
+  android:
+    name: Android libraries (arm64-v8a, armeabi-v7a, x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build JNI libraries
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o dist/jniLibs build --release -p inhouse-tts-android
+      - name: Build the CLI for Termux (arm64)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          cargo ndk -t arm64-v8a build --release -p inhouse-tts-cli
+          mkdir -p dist/termux && cp target/aarch64-linux-android/release/inhouse-tts dist/termux/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inhouse-tts-android
+          path: dist
+
+  arm64:
+    name: NEON kernels under qemu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - run: cargo test --release -p inhouse-tts-core --target aarch64-unknown-linux-gnu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu

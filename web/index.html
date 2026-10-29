@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inhouse TTS</title>
+<meta name="description" content="Inhouse TTS: realistic, multilingual text-to-speech with regional accents, written entirely in Rust and running locally in your browser.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23e8590c'/%3E%3Cpath d='M18 24v16M26 18v28M34 12v40M42 20v24M50 27v10' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f6f4f1; --card: #ffffff; --ink: #1c1b1a; --muted: #6b6560; --line: #e4dfd9;
+  --accent: #e8590c; --accent-ink: #ffffff; --soft: #fff1e8; --error: #c92a2a; --code: #f1ede8;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151413; --card: #1f1d1c; --ink: #f1eeea; --muted: #a39d97; --line: #34312e;
+    --accent: #ff7a2f; --accent-ink: #1b0c03; --soft: #2b1c13; --error: #ff6b6b; --code: #262321;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35); }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 32px 16px 48px; }
+header { display: flex; gap: 16px; align-items: center; margin-bottom: 8px; }
+.logo { width: 48px; height: 48px; border-radius: 12px; background: var(--accent); display: grid; place-items: center; flex: none; }
+.logo svg { width: 30px; height: 30px; }
+h1 { font-size: 28px; line-height: 1.1; margin: 0; letter-spacing: -.02em; }
+#subtitle { margin: 4px 0 0; color: var(--muted); font-size: 15px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 24px; }
+.badge { font-size: 12px; padding: 3px 10px; border-radius: 99px; background: var(--soft); color: var(--accent); font-weight: 600; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: var(--shadow); }
+label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 6px; }
+textarea { width: 100%; min-height: 140px; resize: vertical; border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 14px; font: inherit; font-size: 17px; background: var(--bg); color: var(--ink); }
+textarea:focus, select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 16px; }
+.row2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 16px; align-items: end; }
+select { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font: inherit;
+  background: var(--bg); color: var(--ink); }
+.speed { display: flex; align-items: center; gap: 12px; }
+input[type=range] { flex: 1; accent-color: var(--accent); }
+#speed-val { font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; color: var(--muted); }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+button { border: 0; border-radius: 10px; padding: 11px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  background: var(--code); color: var(--ink); }
+button.primary { background: var(--accent); color: var(--accent-ink); min-width: 140px; }
+button:disabled { opacity: .45; cursor: default; }
+#bar-wrap { display: none; height: 6px; background: var(--code); border-radius: 99px; overflow: hidden; margin-top: 18px; }
+#bar { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+#status { margin-top: 14px; font-size: 14px; min-height: 21px; }
+#status.error { color: var(--error); }
+#metrics { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; min-height: 20px; }
+details { margin-top: 18px; }
+summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
+#phonemes { margin: 8px 0 0; padding: 12px 14px; background: var(--code); border-radius: 10px; white-space: pre-wrap;
+  word-break: break-word; font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+footer { margin-top: 24px; color: var(--muted); font-size: 13px; }
+footer a { color: var(--accent); }
+@media (max-width: 640px) { .row, .row2 { grid-template-columns: 1fr; } h1 { font-size: 24px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="logo"><svg viewBox="0 0 64 64"><path d="M14 26v12M24 18v28M34 10v44M44 20v24M54 27v10" stroke="#fff" stroke-width="6" stroke-linecap="round"/></svg></div>
+    <div>
+      <h1>Inhouse TTS</h1>
+      <p id="subtitle">Voz neuronal realista, multilingüe y con acentos regionales. 100 % Rust, en tu dispositivo.</p>
+    </div>
+  </header>
+  <div class="badges">
+    <span class="badge">100% Rust → WebAssembly SIMD</span>
+    <span class="badge">Local · sin servidor</span>
+    <span class="badge">13 acentos: es-ES · MX · AR · CO · CL · PE · VE · Caribe · PR · Andalucía · Canarias · en-US · en-GB</span>
+    <span class="badge">Open source</span>
+  </div>
+  <section class="card">
+    <label id="l-text" for="text">Texto</label>
+    <textarea id="text" spellcheck="false"></textarea>
+    <div class="row">
+      <div><label id="l-locale" for="locale">Idioma y acento</label><select id="locale"></select></div>
+      <div><label id="l-voice" for="voice">Voz</label><select id="voice"></select></div>
+    </div>
+    <div class="row2">
+      <div><label id="l-speed" for="speed">Velocidad</label>
+        <div class="speed"><input id="speed" type="range" min="0.6" max="1.6" step="0.05" value="1"><span id="speed-val">1.00×</span></div></div>
+      <div><label id="l-threads" for="threads">Hilos de síntesis</label><select id="threads"></select></div>
+    </div>
+    <div class="actions">
+      <button id="speak" class="primary">▶ Hablar</button>
+      <button id="stop">■ Parar</button>
+      <button id="download">⬇ Descargar WAV</button>
+    </div>
+    <div id="bar-wrap"><div id="bar"></div></div>
+    <div id="status">Cargando…</div>
+    <div id="metrics"></div>
+    <details>
+      <summary id="l-phonemes">Fonemas generados (IPA)</summary>
+      <pre id="phonemes"></pre>
+    </details>
+  </section>
+  <footer>
+    <p id="offline">Funciona sin conexión tras la primera carga.</p>
+    <p id="about"></p>
+    <p><a href="https://github.com/miguelcoxcaballero/inhouse-TTS">GitHub</a> ·
+       <a href="https://github.com/miguelcoxcaballero/inhouse-TTS/blob/main/docs/ARCHITECTURE.md">Arquitectura / Architecture</a> ·
+       <a href="https://github.com/miguelcoxcaballero/inhouse-TTS/blob/main/docs/RESEARCH.md">Investigación / Research</a></p>
+  </footer>
+</main>
+<noscript>Inhouse TTS necesita WebAssembly y JavaScript habilitados.</noscript>
+<script type="module" src="main.js"></script>
+</body>
+</html>

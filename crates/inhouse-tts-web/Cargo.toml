@@ -1,0 +1,71 @@
+[package]
+name = "inhouse-tts-web"
+description = "Inhouse TTS in the browser: Rust/WebAssembly UI, streaming playback and a synthesis Web Worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+inhouse-tts = { workspace = true, default-features = false }
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "AudioBuffer",
+  "AudioBufferSourceNode",
+  "AudioContext",
+  "AudioContextOptions",
+  "AudioContextState",
+  "AudioDestinationNode",
+  "AudioNode",
+  "AudioScheduledSourceNode",
+  "BaseAudioContext",
+  "Blob",
+  "BlobPropertyBag",
+  "Cache",
+  "CacheStorage",
+  "console",
+  "CssStyleDeclaration",
+  "DedicatedWorkerGlobalScope",
+  "Document",
+  "DomTokenList",
+  "Element",
+  "Event",
+  "EventTarget",
+  "HtmlAnchorElement",
+  "HtmlButtonElement",
+  "HtmlElement",
+  "HtmlInputElement",
+  "HtmlOptGroupElement",
+  "HtmlOptionElement",
+  "HtmlSelectElement",
+  "HtmlTextAreaElement",
+  "KeyboardEvent",
+  "Location",
+  "MessageEvent",
+  "Navigator",
+  "Performance",
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "Request",
+  "Response",
+  "Url",
+  "Window",
+  "Worker",
+  "WorkerGlobalScope",
+  "WorkerNavigator",
+  "WorkerOptions",
+  "WorkerType",
+]

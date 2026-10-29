@@ -207,7 +207,23 @@ impl Engine {
         &mut self.frontend
     }
 
-    fn resolve_voice(&self, spec: &str) -> Result<Voice> {
+    /// True if every voice named in a voice spec (`a`, `a+b`, `0.7*a+0.3*b`) is loaded.
+    pub fn has_voices(&self, spec: &str) -> bool {
+        Self::voice_names(spec)
+            .iter()
+            .all(|n| self.voices.contains_key(n.as_str()))
+    }
+
+    /// Voice names used by a voice spec.
+    pub fn voice_names(spec: &str) -> Vec<String> {
+        spec.split(['+', ','])
+            .map(|t| t.split_once('*').map_or(t, |(_, n)| n).trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    /// Resolves a voice spec into a (possibly blended) voice.
+    pub fn resolve_voice(&self, spec: &str) -> Result<Voice> {
         if let Some(v) = self.voices.get(spec) {
             return Ok(v.clone());
         }

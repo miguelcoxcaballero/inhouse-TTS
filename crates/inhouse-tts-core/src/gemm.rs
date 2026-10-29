@@ -149,7 +149,11 @@ pub fn kernel() -> &'static Kernel {
 fn select_kernel() -> Kernel {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        let force_sse = std::env::var_os("IHTTS_KERNEL").is_some_and(|v| v == "sse");
+        if !force_sse
+            && std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("fma")
+        {
             return Kernel {
                 mr: 6,
                 nr: 16,
@@ -176,10 +180,10 @@ fn select_kernel() -> Kernel {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
         return Kernel {
-            mr: 4,
+            mr: 6,
             nr: 8,
-            name: "wasm32 SIMD128 4x8",
-            f: wasm::k4x8,
+            name: "wasm32 SIMD128 6x8",
+            f: wasm::k6x8,
         };
     }
     Kernel {
@@ -792,7 +796,7 @@ mod wasm {
         )*};
     }
 
-    pub unsafe fn k4x8(
+    pub unsafe fn k6x8(
         kc: usize,
         a: *const f32,
         b: *const f32,
@@ -803,19 +807,19 @@ mod wasm {
         acc: bool,
     ) {
         let z = f32x4_splat(0.0);
-        let mut c0 = [z; 4];
-        let mut c1 = [z; 4];
+        let mut c0 = [z; 6];
+        let mut c1 = [z; 6];
         let mut a = a;
         let mut b = b;
         for _ in 0..kc {
             let b0 = v128_load(b as *const v128);
             let b1 = v128_load(b.add(4) as *const v128);
-            row4!(a, b0, b1, c0, c1, 0, 1, 2, 3);
-            a = a.add(4);
+            row4!(a, b0, b1, c0, c1, 0, 1, 2, 3, 4, 5);
+            a = a.add(6);
             b = b.add(8);
         }
-        if mr == 4 && nr == 8 {
-            for r in 0..4 {
+        if mr == 6 && nr == 8 {
+            for r in 0..6 {
                 let cp = c.add(r * ldc);
                 let (mut v0, mut v1) = (c0[r], c1[r]);
                 if acc {
@@ -826,8 +830,8 @@ mod wasm {
                 v128_store(cp.add(4) as *mut v128, v1);
             }
         } else {
-            let mut t = [0f32; 32];
-            for r in 0..4 {
+            let mut t = [0f32; 48];
+            for r in 0..6 {
                 v128_store(t.as_mut_ptr().add(r * 8) as *mut v128, c0[r]);
                 v128_store(t.as_mut_ptr().add(r * 8 + 4) as *mut v128, c1[r]);
             }
