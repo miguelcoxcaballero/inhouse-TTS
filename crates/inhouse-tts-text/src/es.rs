@@ -542,19 +542,31 @@ fn is_vowel_letter(c: char) -> bool {
     "aeiouáéíóúü".contains(c)
 }
 
-/// All-caps tokens without a vowel pattern are spelled (DNI, PP, BBVA).
+/// Consonant pairs that can start a Spanish syllable.
+const ONSET_PAIRS: [&str; 18] = [
+    "pl", "pr", "bl", "br", "fl", "fr", "gl", "gr", "cl", "cr", "kl", "kr", "dr", "tr", "tl", "ch",
+    "ll", "rr",
+];
+
+/// All-caps tokens that cannot be read as a Spanish word are spelled (DNI,
+/// PP, BBVA, GPU, USB); pronounceable ones are read (ONU, OTAN, UNESCO).
 fn is_spelled_acronym(w: &str) -> bool {
     let n = w.chars().count();
-    if n < 2 || n > 6 || !w.chars().all(|c| c.is_uppercase()) {
+    if !(2..=6).contains(&n) || !w.chars().all(|c| c.is_uppercase()) {
         return false;
     }
     let lower: Vec<char> = w.to_lowercase().chars().collect();
+    let consonant = |c: &char| !is_vowel_letter(*c);
     let vowels = lower.iter().filter(|c| is_vowel_letter(**c)).count();
+    let bad_onset = consonant(&lower[0])
+        && consonant(&lower[1])
+        && !ONSET_PAIRS.contains(&lower[..2].iter().collect::<String>().as_str());
+    let final_cluster = consonant(&lower[n - 1]) && consonant(&lower[n - 2]);
     vowels == 0
         || n == 2
-        || lower
-            .windows(3)
-            .any(|t| t.iter().all(|c| !is_vowel_letter(*c)))
+        || bad_onset
+        || final_cluster
+        || lower.windows(3).any(|t| t.iter().all(consonant))
 }
 
 /// Normalises raw text into a sequence of plain lower-case words and
@@ -1375,6 +1387,16 @@ mod tests {
         assert_eq!(es("guerra"), "ɡˈera");
         assert_eq!(es("electricidad"), "ˌelektɾˌiθiðˈad");
         assert_eq!(es("rápidamente"), "rˈapiðamˈente");
+    }
+
+    #[test]
+    fn acronyms() {
+        for a in ["DNI", "PP", "BBVA", "GPU", "USB", "UGT", "PC", "IBM"] {
+            assert!(is_spelled_acronym(a), "{a} should be spelled");
+        }
+        for a in ["ONU", "OTAN", "UNESCO", "NASA", "IVA", "FIFA", "Hola"] {
+            assert!(!is_spelled_acronym(a), "{a} should be read as a word");
+        }
     }
 
     #[test]
