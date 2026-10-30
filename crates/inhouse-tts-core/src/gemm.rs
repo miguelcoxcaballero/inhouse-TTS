@@ -513,6 +513,23 @@ fn gemm_block(
 
 /// `C (+)= A · B` with an already packed `A`.
 pub fn gemm_packed(pa: &PackedA, b: &BSrc, c: &mut [f32], ldc: usize, accumulate: bool) {
+    gemm_packed_impl(pa, b, c, ldc, accumulate, false);
+}
+
+/// Like [`gemm_packed`] but always on the calling thread (for callers that
+/// already run independent problems in parallel).
+pub fn gemm_packed_serial(pa: &PackedA, b: &BSrc, c: &mut [f32], ldc: usize, accumulate: bool) {
+    gemm_packed_impl(pa, b, c, ldc, accumulate, true);
+}
+
+fn gemm_packed_impl(
+    pa: &PackedA,
+    b: &BSrc,
+    c: &mut [f32],
+    ldc: usize,
+    accumulate: bool,
+    serial: bool,
+) {
     let kern = kernel();
     assert_eq!(pa.mr, kern.mr, "packed for another kernel");
     assert_eq!(pa.k, b.k(), "inner dimensions differ");
@@ -533,7 +550,7 @@ pub fn gemm_packed(pa: &PackedA, b: &BSrc, c: &mut [f32], ldc: usize, accumulate
     let threads = par::num_threads();
     let work = m * n * pa.k;
     let panels = pa.panels;
-    if threads <= 1 || work < 1 << 21 {
+    if serial || threads <= 1 || work < 1 << 21 {
         gemm_block(kern, pa, b, 0, n, 0, panels, cp, ldc, accumulate);
         return;
     }

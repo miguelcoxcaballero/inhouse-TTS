@@ -12,6 +12,7 @@ pub mod gemm;
 pub mod gpu;
 pub mod math;
 pub mod model;
+pub mod onnx;
 pub mod ops;
 pub mod par;
 pub mod profile;

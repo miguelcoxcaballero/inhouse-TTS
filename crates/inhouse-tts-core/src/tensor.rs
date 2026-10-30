@@ -196,6 +196,11 @@ impl Matrix {
         self.with_packed(|p| gemm::gemm_packed(p, b, c, ldc, accumulate));
     }
 
+    /// `C (+)= self · B` on the calling thread only.
+    pub fn gemm_serial(&self, b: &BSrc, c: &mut [f32], ldc: usize, accumulate: bool) {
+        self.with_packed(|p| gemm::gemm_packed_serial(p, b, c, ldc, accumulate));
+    }
+
     /// Dense f32 copy of row `r`.
     pub fn row_f32(&self, r: usize) -> Vec<f32> {
         let mut out = vec![0f32; self.cols];

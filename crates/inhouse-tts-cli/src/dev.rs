@@ -329,6 +329,93 @@ pub fn run(args: &[String]) -> bool {
             );
             std::fs::write(&out, dsp::wav_bytes(&audio, m.sample_rate)).unwrap();
         }
+        Some("piper-convert") => {
+            // Piper voice (.onnx + .onnx.json) → .ihw.
+            use inhouse_tts_core::model::piper;
+            let onnx = arg(&args, "--onnx").expect("--onnx");
+            let json = arg(&args, "--json").unwrap_or_else(|| format!("{onnx}.json"));
+            let out = arg(&args, "--out").expect("--out");
+            let dtype = match arg(&args, "--dtype").as_deref().unwrap_or("f16") {
+                "f32" => DType::F32,
+                "f16" => DType::F16,
+                "q8" => DType::Q8,
+                d => panic!("unknown dtype {d}"),
+            };
+            let t = Instant::now();
+            let ihw = piper::convert(
+                &std::fs::read(&onnx).unwrap(),
+                &std::fs::read(&json).unwrap(),
+                dtype,
+            )
+            .unwrap();
+            std::fs::write(&out, &ihw).unwrap();
+            println!(
+                "wrote {out} ({:.1} MB) in {:?}",
+                ihw.len() as f64 / 1e6,
+                t.elapsed()
+            );
+        }
+        Some("piper-synth") => {
+            // Piper inference from ids or from espeak-ng IPA (already NFD).
+            use inhouse_tts_core::model::piper::{Piper, PiperOptions};
+            let model = arg(&args, "--model").expect("--model");
+            let out = arg(&args, "--out").expect("--out");
+            let t = Instant::now();
+            let m = Piper::load(
+                WeightFile::parse(&std::fs::read(&model).unwrap()).unwrap(),
+                true,
+            )
+            .unwrap();
+            println!(
+                "loaded {} ({}, espeak voice {:?}, {} Hz, {} speaker(s)) in {:?}",
+                m.meta["name"].as_str().unwrap_or("piper"),
+                m.language(),
+                m.espeak_voice(),
+                m.sample_rate,
+                m.num_speakers(),
+                t.elapsed()
+            );
+            let ids: Vec<i64> = match (arg(&args, "--ids"), arg(&args, "--ph")) {
+                (Some(ids), _) => ids
+                    .split(',')
+                    .map(|s| s.trim().parse().expect("--ids: comma-separated integers"))
+                    .collect(),
+                (None, Some(ph)) => m.encode(&ph),
+                (None, None) => panic!("--ids or --ph"),
+            };
+            if args.iter().any(|a| a == "--print-ids") {
+                println!("ids {ids:?}");
+            }
+            let d = m.defaults();
+            let num = |name: &str, default: f32| -> f32 {
+                arg(&args, name).map_or(default, |s| s.parse().unwrap())
+            };
+            let opts = PiperOptions {
+                noise_scale: num("--noise-scale", d.noise_scale),
+                length_scale: num("--length-scale", d.length_scale),
+                noise_w: num("--noise-w", d.noise_w),
+                seed: arg(&args, "--seed").map_or(1, |s| s.parse().unwrap()),
+            };
+            let speaker: usize = arg(&args, "--speaker").map_or(0, |s| s.parse().unwrap());
+            let runs: usize = arg(&args, "--runs").map_or(1, |s| s.parse().unwrap());
+            let mut best = f64::INFINITY;
+            let mut o = None;
+            for _ in 0..runs.max(1) {
+                let t = Instant::now();
+                o = Some(m.synthesize(&ids, speaker, opts).unwrap());
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            let o = o.unwrap();
+            let dur = o.audio.len() as f64 / m.sample_rate as f64;
+            println!(
+                "{} ids, {} frames, {dur:.2}s audio in {best:.3}s (RTF {:.3}, {} threads)",
+                ids.len(),
+                o.durations.iter().sum::<usize>(),
+                best / dur.max(1e-9),
+                inhouse_tts_core::par::num_threads()
+            );
+            std::fs::write(&out, dsp::wav_bytes(&o.audio, m.sample_rate)).unwrap();
+        }
         Some("build-lexicon") => {
             // Merges misaki gold + silver JSON lexicons into the compact
             // `.lex` text format: `word\tphonemes` or
