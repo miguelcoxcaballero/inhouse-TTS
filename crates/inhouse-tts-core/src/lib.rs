@@ -15,6 +15,7 @@ pub mod model;
 pub mod ops;
 pub mod par;
 pub mod profile;
+pub mod resample;
 pub mod tensor;
 #[cfg(feature = "convert")]
 pub mod torchload;
