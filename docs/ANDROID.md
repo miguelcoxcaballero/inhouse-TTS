@@ -24,7 +24,8 @@ El workflow **Android** de GitHub Actions publica estos `.so` como artefacto en 
 
 ## 2. Modelos
 
-Copia `k82.ihw` y `voices.ihw` a los *assets* de la app o descárgalos la primera vez; los genera `cargo xtask models`. En el móvil conviene el modelo `--dtype f16` (169 MB) o `q8` (116 MB).
+- **Voces en español (Piper)**: un `.ihw` por voz, de 31 a 57 MB (`es_ES-davefx`, `es_ES-sharvard` con voz femenina y masculina, `es_MX-ald` y `es_AR-daniela`). Se convierten desde los `.onnx` y `.onnx.json` de [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) con `inhouse-tts piper-convert --onnx X.onnx --json X.onnx.json --out X.ihw`. Corren a unas 20× tiempo real en 4 núcleos de PC.
+- **Voces en inglés (K82)**: `k82.ihw` y `voices.ihw`, generados con `cargo xtask models`. En el móvil conviene `--dtype f16` (169 MB) o `q8` (116 MB). Si la app solo habla español, no hacen falta: crea el motor con un modelo vacío.
 
 ```bash
 cargo xtask models --kokoro ruta/a/Kokoro-82M --out models --dtype f16
@@ -55,6 +56,9 @@ class InhouseTts(model: ByteArray, voices: ByteArray, gpu: Boolean = true) : Aut
 
     fun phonemize(text: String, locale: String): String = nativePhonemize(handle, text, locale)
 
+    /** Añade una voz Piper (.ihw); las de varios hablantes añaden "nombre-<hablante>". */
+    fun addPiper(name: String, model: ByteArray) = nativeAddPiper(handle, name, model)
+
     override fun close() { if (handle != 0L) { nativeDestroy(handle); handle = 0L } }
 
     companion object {
@@ -66,6 +70,7 @@ class InhouseTts(model: ByteArray, voices: ByteArray, gpu: Boolean = true) : Aut
         @JvmStatic private external fun nativeSpeak(h: Long, text: String, locale: String, voice: String, speed: Float): FloatArray
         @JvmStatic private external fun nativeStream(h: Long, text: String, locale: String, voice: String, speed: Float, l: ChunkListener)
         @JvmStatic private external fun nativePhonemize(h: Long, text: String, locale: String): String
+        @JvmStatic private external fun nativeAddPiper(h: Long, name: String, model: ByteArray)
     }
 }
 ```

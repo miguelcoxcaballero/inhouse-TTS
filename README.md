@@ -12,29 +12,30 @@
 | ⚡ **Local y en streaming** | el audio empieza con la primera frase; RTF ≈ 0,45 en un PC de 4 núcleos; funciona sin conexión |
 | 🎮 **GPU** | WebGPU en el navegador, y Vulkan, Metal o DX12 en nativo y Android (`wgpu`). Salida idéntica a la CPU (101–104 dB) |
 | 📱 **Cualquier dispositivo** | x86-64 (AVX2/FMA, SSE2), ARM64/Android (NEON), navegador (WebAssembly SIMD128 o WebGPU) |
-| 🔓 **Open source** | código Apache-2.0 / MIT; voces puente con pesos Apache-2.0 |
+| 🔓 **Open source** | código Apache-2.0 / MIT; voces de [Piper](https://huggingface.co/rhasspy/piper-voices) (MIT) en español y de Kokoro-82M (Apache-2.0) en inglés, todas ejecutadas en nuestro motor |
 
 ## Ejemplos
 
-Generados con `inhouse-tts say`, sin retoques. La misma voz (`ef_dora`) cambia de acento con las reglas fonológicas de cada región:
+Generados con `inhouse-tts say`, sin retoques. Cada acento usa una voz nativa de su zona y las reglas fonológicas de la región:
 
-| Locale | Rasgos audibles | Audio |
-|---|---|---|
-| es-ES | distinción z/c ≠ s | [es-ES_ef_dora.wav](samples/es-ES_ef_dora.wav) |
-| es-MX | seseo | [es-MX_ef_dora.wav](samples/es-MX_ef_dora.wav) |
-| es-AR | sheísmo («ʃo me ʃamo»), /s/ aspirada | [es-AR_ef_dora.wav](samples/es-AR_ef_dora.wav) |
-| es-CO | jota suave [h] | [es-CO_ef_dora.wav](samples/es-CO_ef_dora.wav) |
-| es-CL | /s/ final aspirada, «cansao» | [es-CL_ef_dora.wav](samples/es-CL_ef_dora.wav) |
-| es-PE | seseo | [es-PE_ef_dora.wav](samples/es-PE_ef_dora.wav) |
-| es-VE | /n/ final velar, /s/ aspirada | [es-VE_ef_dora.wav](samples/es-VE_ef_dora.wav) |
-| es-CU | Caribe: /s/ y /d/ finales, «cansao» | [es-CU_ef_dora.wav](samples/es-CU_ef_dora.wav) |
-| es-PR | además /r/ → [l] en coda («comel») | [es-PR_ef_dora.wav](samples/es-PR_ef_dora.wav) |
-| es-AN | andaluz: «andalú», /s/ aspirada | [es-AN_ef_dora.wav](samples/es-AN_ef_dora.wav) |
-| es-IC | canario | [es-IC_ef_dora.wav](samples/es-IC_ef_dora.wav) |
-| en-US | American English (`af_heart`) | [en-US_af_heart.wav](samples/en-US_af_heart.wav) |
-| en-GB | British English (`bf_emma`) | [en-GB_bf_emma.wav](samples/en-GB_bf_emma.wav) |
+| Locale | Voz | Rasgos audibles | Audio |
+|---|---|---|---|
+| es-ES | Sharvard (F) | distinción z/c ≠ s | [es-ES_es_ES-sharvard-F.wav](samples/es-ES_es_ES-sharvard-F.wav) |
+| es-ES | Davefx (M) | distinción z/c ≠ s | [es-ES_es_ES-davefx.wav](samples/es-ES_es_ES-davefx.wav) |
+| es-AN | Sharvard (F) | andaluz: «andalú», /s/ aspirada | [es-AN_es_ES-sharvard-F.wav](samples/es-AN_es_ES-sharvard-F.wav) |
+| es-IC | Sharvard (F) | canario | [es-IC_es_ES-sharvard-F.wav](samples/es-IC_es_ES-sharvard-F.wav) |
+| es-MX | Ald (M) | seseo | [es-MX_es_MX-ald.wav](samples/es-MX_es_MX-ald.wav) |
+| es-AR | Daniela (F) | rioplatense: sheísmo («ʃo me ʃamo»), /s/ aspirada | [es-AR_es_AR-daniela.wav](samples/es-AR_es_AR-daniela.wav) |
+| es-CO | Ald (M) | jota suave [h] | [es-CO_es_MX-ald.wav](samples/es-CO_es_MX-ald.wav) |
+| es-CL | Ald (M) | /s/ final aspirada, «cansao» | [es-CL_es_MX-ald.wav](samples/es-CL_es_MX-ald.wav) |
+| es-PE | Ald (M) | seseo | [es-PE_es_MX-ald.wav](samples/es-PE_es_MX-ald.wav) |
+| es-VE | Ald (M) | /n/ final velar, /s/ aspirada | [es-VE_es_MX-ald.wav](samples/es-VE_es_MX-ald.wav) |
+| es-CU | Ald (M) | Caribe: /s/ y /d/ finales, «cansao» | [es-CU_es_MX-ald.wav](samples/es-CU_es_MX-ald.wav) |
+| es-PR | Ald (M) | además /r/ → [l] en coda («comel») | [es-PR_es_MX-ald.wav](samples/es-PR_es_MX-ald.wav) |
+| en-US | Heart (F, `af_heart`) | American English | [en-US_af_heart.wav](samples/en-US_af_heart.wav) |
+| en-GB | Emma (F, `bf_emma`) | British English | [en-GB_bf_emma.wav](samples/en-GB_bf_emma.wav) |
 
-Inteligibilidad medida con Whisper-small sobre estos ejemplos: **WER medio del 10,8 %**. Casi todos los «errores» son la marca («Inhao TTS») o el propio acento: Whisper escribe «Asento» con seseo, «Andalú» y «Saludo».
+Inteligibilidad medida con Whisper-small sobre los ejemplos en español: **WER medio del 16 %**, sin contar el nombre «Inhouse TTS» (que Whisper no conoce). Casi todos los «errores» son el propio acento («asento» con seseo, «andalú»). En frases neutras de castellano, las voces de España dan un **0 %**. La voz argentina (Daniela) es la más débil (10–15 %) y la mexicana (Ald) a veces confunde «hablo» con «abro».
 
 ## Uso rápido (CLI)
 
@@ -42,14 +43,22 @@ Inteligibilidad medida con Whisper-small sobre estos ejemplos: **WER medio del 1
 cargo build --release -p inhouse-tts-cli
 ```
 
-Conversión de los pesos puente a nuestro formato `.ihw`, que hace falta una sola vez. Antes descarga [Kokoro-82M v1.0](https://huggingface.co/hexgrad/Kokoro-82M) (`config.json`, `kokoro-v1_0.pth` y `voices/*.pt`) a `ruta/Kokoro-82M`:
+Las voces se convierten una sola vez a nuestro formato `.ihw`.
+
+**Español (Piper).** Descarga el `.onnx` y el `.onnx.json` de cada voz de [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices): `es_ES-davefx-medium`, `es_ES-sharvard-medium`, `es_MX-ald-medium` y `es_AR-daniela-high`. Luego conviértelas en `models/piper/`, que la CLI carga automáticamente:
+
+```bash
+./target/release/inhouse-tts piper-convert --onnx es_ES-davefx-medium.onnx --json es_ES-davefx-medium.onnx.json --out models/piper/es_ES-davefx-medium.ihw
+```
+
+**Inglés (Kokoro).** Descarga [Kokoro-82M v1.0](https://huggingface.co/hexgrad/Kokoro-82M) (`config.json`, `kokoro-v1_0.pth` y `voices/*.pt`) a `ruta/Kokoro-82M`:
 
 ```bash
 cargo xtask models --kokoro ruta/Kokoro-82M --out models
 ```
 
 ```bash
-./target/release/inhouse-tts say -l es-AR -o hola.wav "¡Hola! Yo me llamo Inhouse TTS."
+./target/release/inhouse-tts say -l es-ES -v es_ES-sharvard-F -o hola.wav "¡Hola! La zeta de Zaragoza y la ce de cielo."
 ```
 
 ```bash
@@ -71,9 +80,9 @@ cargo xtask models --kokoro ruta/Kokoro-82M --out models
 ```rust
 use inhouse_tts::{Engine, SpeakOptions};
 
-let mut tts = Engine::new(&std::fs::read("models/k82.ihw")?, Default::default())?;
-tts.add_voices(&std::fs::read("models/voices.ihw")?)?;
-let opts = SpeakOptions { locale: "es-MX".into(), voice: "ef_dora".into(), ..Default::default() };
+let mut tts = Engine::without_model();   // solo voces Piper; Engine::new(k82) para el inglés
+tts.add_piper("es_ES-davefx", &std::fs::read("models/piper/es_ES-davefx-medium.ihw")?)?;
+let opts = SpeakOptions { locale: "es-ES".into(), voice: "es_ES-davefx".into(), ..Default::default() };
 for chunk in tts.stream("Hola, ¿qué tal? Esto es Inhouse TTS.", &opts)? {
     let chunk = chunk?;          // PCM f32, 24 kHz, en cuanto está listo
     play(&chunk.audio);
@@ -99,8 +108,12 @@ texto → normalización → G2P + reglas de acento → troceado → modelo acú
   - LSTM, ALBERT, AdaIN y Snake; STFT/iSTFT con semántica de PyTorch.
   - Pesos f32/f16/int8 en el formato propio `.ihw` y conversor seguro de checkpoints PyTorch (sin ejecutar pickle).
   - **Backend de GPU** con `wgpu`: convolución como GEMM implícita sobre los pesos int8, AdaIN con Snake fusionado y convolución transpuesta polifásica. Kernels WGSL embebidos en Rust.
-- **Modelo puente K82**: StyleTTS2 + iSTFTNet, compatible con los pesos Apache-2.0 de Kokoro-82M. **Reproduce la referencia con 106–131 dB de SNR** en cada etapa.
-- **Modelo propio IHV1**, entrenado desde cero sin ningún modelo de terceros: VITS con decodificador iSTFT multibanda, acento y voz como condiciones separadas. Los datos y el entrenamiento son Rust (`ihtts-data`, `ihtts-train` con *burn*), y la inferencia corre en el mismo motor (paridad de 1 LSB con el entrenador). Las primeras voces de castellano se entrenan en Google Colab con grabaciones de banda completa y acento verificado. Ver [Entrenar el modelo propio](#entrenar-el-modelo-propio).
+- **Voces en español: Piper (VITS)**, reimplementado en el motor.
+  - Un lector propio de ONNX convierte los modelos a `.ihw`; no se usa onnxruntime ni espeak, porque nuestros fonemas se convierten al IPA con el que se entrenaron.
+  - Reproduce onnxruntime con duraciones idénticas y error máximo de 5·10⁻⁵ en voces medium, low, x_low y high.
+  - Va 20× más rápido que el tiempo real en 4 núcleos (RTF 0,045) y 2,7× en el navegador.
+- **Voces en inglés: modelo K82** (StyleTTS2 + iSTFTNet), compatible con los pesos Apache-2.0 de Kokoro-82M. **Reproduce la referencia con 106–131 dB de SNR** en cada etapa.
+- **Modelo propio IHV1**, entrenado desde cero sin ningún modelo de terceros: VITS con decodificador iSTFT multibanda, acento y voz como condiciones separadas. Los datos y el entrenamiento son Rust (`ihtts-data`, `ihtts-train` con *burn*), y la inferencia corre en el mismo motor (paridad de 1 LSB con el entrenador). Está listo para entrenarse en Google Colab con grabaciones castellanas de banda completa y acento verificado, pero de momento las voces publicadas son las de Piper. Ver [Entrenar el modelo propio](#entrenar-el-modelo-propio).
 - **Modelo IH-1**, el siguiente paso: latentes continuos a 12,5 Hz, unas 40× menos cómputo que K82, para tiempo real en cualquier móvil y en WASM.
 
 Documentación:
@@ -139,11 +152,19 @@ El 88 % del cómputo es el vocoder iSTFTNet, ~25 GMAC por segundo de audio, y po
 - [ ] AVX-512; hilos en WASM; medir y ajustar los kernels en GPUs reales
 - [ ] Portugués (BR/PT), francés (FR/CA), italiano e hindi en el front-end
 - [x] Datos y entrenamiento en Rust: corpus permisivos de banda completa con acento verificado, modelo propio IHV1, Colab
-- [ ] Primeras voces propias de castellano (en entrenamiento) y después de los demás acentos; retirar las voces puente
+- [x] Voces nativas por acento en español (Piper en nuestro motor): castellano con distinción, México, Argentina
+- [ ] Voces propias entrenadas (IHV1) para sustituir a las de terceros
 - [ ] IH-Codec e IH-1 entrenados en Rust con datos permisivos y destilados a 8–30M parámetros
 
 ## Licencias y créditos
 
 - Código: **Apache-2.0 o MIT**, a tu elección.
-- Voces puente: pesos de [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) de hexgrad (Apache-2.0), convertidos al formato `.ihw` durante el build. No se incluyen en este repositorio.
+- **Voces en español**: modelos VITS de [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) (MIT), convertidos al formato `.ihw` y ejecutados por nuestro motor, sin onnxruntime ni espeak. Datos de entrenamiento según cada ficha:
+  - *davefx*: CC0;
+  - *sharvard*: CC BY 3.0 (Aubanel, García Lecumberri y Cooke, 2014);
+  - *ald*: Unlicense;
+  - *daniela*: CC BY-SA 4.0 (Google, OpenSLR 61).
+
+  Ojo: según sus fichas, davefx, sharvard y daniela se ajustaron partiendo de la voz inglesa *lessac* de Piper, cuyos datos (Blizzard 2013) tienen una licencia solo para investigación; ald parte de davefx. Antes de un uso comercial conviene revisarlo legalmente.
+- **Voces en inglés**: pesos de [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) de hexgrad (Apache-2.0), convertidos al formato `.ihw` durante el build. No se incluyen en este repositorio.
 - Léxicos ingleses: derivados de [misaki](https://github.com/hexgrad/misaki) (Apache-2.0). Ver [NOTICE](NOTICE).

@@ -19,9 +19,16 @@ pub struct Handle {
     engine: Mutex<Engine>,
 }
 
+/// An empty `model` creates an engine for Piper voices only (add them with
+/// `nativeAddPiper` / `ihtts_add_piper`); the voice pack is then ignored.
 fn create(model: &[u8], voices: &[u8], gpu: bool) -> Result<Box<Handle>, String> {
-    let mut engine = load(model, gpu)?;
-    engine.add_voices(voices).map_err(|e| e.0)?;
+    let engine = if model.is_empty() {
+        Engine::without_model()
+    } else {
+        let mut e = load(model, gpu)?;
+        e.add_voices(voices).map_err(|e| e.0)?;
+        e
+    };
     Ok(Box::new(Handle {
         engine: Mutex::new(engine),
     }))
@@ -148,6 +155,30 @@ pub unsafe extern "system" fn Java_com_inhouse_tts_InhouseTts_nativeAccelerator(
     };
     let c = CString::new(accelerator(h)).unwrap_or_default();
     ((**env).NewStringUTF.unwrap())(env, c.as_ptr())
+}
+
+/// `static native void nativeAddPiper(long handle, String name, byte[] model)`:
+/// adds a Piper voice (`.ihw`); multi-speaker models add `name-<speaker>`.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_inhouse_tts_InhouseTts_nativeAddPiper(
+    env: *mut JNIEnv,
+    _: jclass,
+    h: jlong,
+    name: jstring,
+    model: jbyteArray,
+) {
+    let Some(h) = handle(h) else {
+        throw(env, "engine is closed");
+        return;
+    };
+    let (name, model) = (string(env, name), bytes(env, model));
+    let r = match h.engine.lock() {
+        Ok(mut e) => e.add_piper(&name, &model).map(|_| ()).map_err(|e| e.0),
+        Err(_) => Err("engine is poisoned".to_string()),
+    };
+    if let Err(e) = r {
+        throw(env, &e);
+    }
 }
 
 /// `static native void nativeDestroy(long handle)`
@@ -284,7 +315,8 @@ pub unsafe extern "system" fn Java_com_inhouse_tts_InhouseTts_nativePhonemize(
 // C ABI
 // ---------------------------------------------------------------------------
 
-/// Creates an engine from a `.ihw` model and voice pack. Returns NULL on error.
+/// Creates an engine from a `.ihw` model and voice pack (NULL model: Piper
+/// voices only, see `ihtts_add_piper`). Returns NULL on error.
 #[no_mangle]
 pub unsafe extern "C" fn ihtts_engine_new(
     model: *const u8,
@@ -292,11 +324,16 @@ pub unsafe extern "C" fn ihtts_engine_new(
     voices: *const u8,
     voices_len: usize,
 ) -> *mut Handle {
-    if model.is_null() || voices.is_null() {
-        return std::ptr::null_mut();
-    }
-    let m = std::slice::from_raw_parts(model, model_len);
-    let v = std::slice::from_raw_parts(voices, voices_len);
+    let m = if model.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(model, model_len)
+    };
+    let v = if voices.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(voices, voices_len)
+    };
     create(m, v, false).map_or(std::ptr::null_mut(), Box::into_raw)
 }
 
@@ -308,11 +345,16 @@ pub unsafe extern "C" fn ihtts_engine_new_gpu(
     voices: *const u8,
     voices_len: usize,
 ) -> *mut Handle {
-    if model.is_null() || voices.is_null() {
-        return std::ptr::null_mut();
-    }
-    let m = std::slice::from_raw_parts(model, model_len);
-    let v = std::slice::from_raw_parts(voices, voices_len);
+    let m = if model.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(model, model_len)
+    };
+    let v = if voices.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(voices, voices_len)
+    };
     create(m, v, true).map_or(std::ptr::null_mut(), Box::into_raw)
 }
 
@@ -334,6 +376,29 @@ pub unsafe extern "C" fn ihtts_accelerator(
         *buf.add(n) = 0;
     }
     name.len()
+}
+
+/// Adds a Piper voice (`.ihw`) under the NUL-terminated `name`; multi-speaker
+/// models add `name-<speaker>`. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn ihtts_add_piper(
+    h: *const Handle,
+    name: *const c_char,
+    model: *const u8,
+    model_len: usize,
+) -> i32 {
+    let (Some(h), false, false) = (h.as_ref(), name.is_null(), model.is_null()) else {
+        return -1;
+    };
+    let name = CStr::from_ptr(name).to_string_lossy();
+    let model = std::slice::from_raw_parts(model, model_len);
+    match h.engine.lock() {
+        Ok(mut e) => match e.add_piper(&name, model) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        },
+        Err(_) => -1,
+    }
 }
 
 #[no_mangle]

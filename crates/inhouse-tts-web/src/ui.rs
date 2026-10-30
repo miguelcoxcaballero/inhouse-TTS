@@ -356,10 +356,17 @@ impl App {
         let Some(loc) = find_locale(&code) else {
             return;
         };
-        let available: Vec<String> = get(&self.manifest, "voices")
+        let mut available: Vec<String> = get(&self.manifest, "voices")
             .dyn_into::<Array>()
             .map(|a| a.iter().filter_map(|v| v.as_string()).collect())
             .unwrap_or_default();
+        if let Ok(models) = get(&self.manifest, "piper").dyn_into::<Array>() {
+            for m in models.iter() {
+                if let Ok(vs) = get(&m, "voices").dyn_into::<Array>() {
+                    available.extend(vs.iter().filter_map(|v| v.as_string()));
+                }
+            }
+        }
         let has = |v: &str| available.is_empty() || available.iter().any(|a| a == v);
         self.ui.voice.set_inner_html("");
         let add_group = |label: &str, names: Vec<&str>| -> Result<(), JsValue> {
@@ -377,14 +384,10 @@ impl App {
             self.ui.voice.append_child(&group)?;
             Ok(())
         };
+        // Only voices made for this language: no voice speaks a language
+        // it was not trained on.
         let native: Vec<&str> = loc.voices.iter().copied().filter(|v| has(v)).collect();
-        let others: Vec<&str> = available
-            .iter()
-            .map(String::as_str)
-            .filter(|v| !loc.voices.contains(v))
-            .collect();
         let _ = add_group(self.s.native_voices, native);
-        let _ = add_group(self.s.other_voices, others);
         if let Some(first) = loc.voices.first() {
             self.ui.voice.set_value(first);
         }
@@ -461,6 +464,7 @@ impl App {
             ("cache", self.cache.clone().into()),
             ("files", get(&model, "files")),
             ("bytes", get(&model, "bytes")),
+            ("piper", get(&self.manifest, "piper")),
             ("report", (index == 0).into()),
             ("gpu", gpu.into()),
         ]);

@@ -25,7 +25,6 @@ pub struct Strings {
     pub first_audio: &'static str,
     pub realtime: &'static str,
     pub native_voices: &'static str,
-    pub other_voices: &'static str,
     pub phonemes: &'static str,
     pub error: &'static str,
     pub empty: &'static str,
@@ -58,12 +57,11 @@ pub const ES: Strings = Strings {
     first_audio: "primer audio en",
     realtime: "× tiempo real",
     native_voices: "Voces nativas",
-    other_voices: "Otras voces (acento cruzado)",
     phonemes: "Fonemas generados (IPA)",
     error: "Error",
     empty: "Escribe algún texto.",
     offline: "Funciona sin conexión tras la primera carga.",
-    about: "Motor y frontend: Inhouse TTS (Apache-2.0/MIT). Voces puente: pesos Kokoro-82M (Apache-2.0) convertidos al formato propio .ihw.",
+    about: "Motor y frontend: Inhouse TTS (Apache-2.0/MIT). Voces en español: Piper (rhasspy/piper-voices, MIT; datos davefx CC0, Sharvard CC BY 3.0, Ald Unlicense, Daniela CC BY-SA 4.0). Voces en inglés: Kokoro-82M (Apache-2.0). Todas se ejecutan en nuestro motor Rust con el formato propio .ihw.",
 };
 
 pub const EN: Strings = Strings {
@@ -91,12 +89,11 @@ pub const EN: Strings = Strings {
     first_audio: "first audio after",
     realtime: "× real time",
     native_voices: "Native voices",
-    other_voices: "Other voices (cross-lingual)",
     phonemes: "Generated phonemes (IPA)",
     error: "Error",
     empty: "Type some text.",
     offline: "Works offline after the first load.",
-    about: "Engine and front end: Inhouse TTS (Apache-2.0/MIT). Bootstrap voices: Kokoro-82M weights (Apache-2.0) converted to the native .ihw format.",
+    about: "Engine and front end: Inhouse TTS (Apache-2.0/MIT). Spanish voices: Piper (rhasspy/piper-voices, MIT; data: davefx CC0, Sharvard CC BY 3.0, Ald Unlicense, Daniela CC BY-SA 4.0). English voices: Kokoro-82M (Apache-2.0). All run on our Rust engine in the native .ihw format.",
 };
 
 pub fn pick(lang: &str) -> &'static Strings {

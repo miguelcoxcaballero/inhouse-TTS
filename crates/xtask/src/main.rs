@@ -2,12 +2,15 @@
 //!
 //! * `models --kokoro DIR [--out models] [--dtype f32|f16|q8]`
 //!   converts the Kokoro-82M v1.0 checkpoint and voices to `.ihw`.
-//! * `web --kokoro DIR [--out web/dist]` builds the GitHub Pages site:
-//!   WebAssembly (SIMD128) + bindings, int8 model split in parts, one file
-//!   per voice, English lexicons and `manifest.json`.
+//! * `web --kokoro DIR [--piper DIR] [--out web/dist]` builds the GitHub
+//!   Pages site: WebAssembly (SIMD128) + bindings, int8 model split in
+//!   parts, one file per English voice, the Piper voices of `--piper`
+//!   (`.onnx` + `.onnx.json`, converted to f16 `.ihw`), English lexicons and
+//!   `manifest.json`.
 //! * `serve [--dir web/dist] [--port 8080]` serves a directory locally.
 
 use inhouse_tts_core::model::k82::convert;
+use inhouse_tts_core::model::piper;
 use inhouse_tts_core::weights::Writer;
 use inhouse_tts_core::{torchload, DType};
 use std::io::{BufRead, BufReader, Write};
@@ -176,27 +179,67 @@ fn web(args: &[String]) {
     let mut version = fnv(&model, 0xcbf2_9ce4_8422_2325);
     // 5. Voices, one file each.
     let mut names = Vec::new();
-    for (name, pack) in voices(&kokoro) {
+    // Only the English voices: every other language has native voices.
+    for (name, pack) in voices(&kokoro)
+        .into_iter()
+        .filter(|(n, _)| n.starts_with(['a', 'b']))
+    {
         let bytes = voice_file(&name, &pack);
         version = fnv(&bytes, version);
         write(&out.join(format!("models/voices/{name}.ihw")), &bytes);
         names.push(name);
     }
+    // 6. Piper voices (`<lang>-<name>-<quality>.onnx` + `.onnx.json`), f16.
+    let mut piper = Vec::new();
+    if let Some(dir) = arg(args, "--piper") {
+        let mut onnx: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| die(format!("{dir}: {e}")))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "onnx"))
+            .collect();
+        onnx.sort();
+        for p in onnx {
+            let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+            let json = read(&p.with_extension("onnx.json"));
+            let bytes = piper::convert(&read(&p), &json, DType::F16).unwrap_or_else(|e| die(e));
+            let name = ["-x_low", "-low", "-medium", "-high"]
+                .iter()
+                .find_map(|q| stem.strip_suffix(q))
+                .unwrap_or(&stem)
+                .to_string();
+            let cfg: serde_json::Value = serde_json::from_slice(&json).unwrap_or_default();
+            let mut voices: Vec<String> = cfg["speaker_id_map"]
+                .as_object()
+                .map(|m| m.keys().map(|s| format!("{name}-{s}")).collect())
+                .unwrap_or_default();
+            if voices.is_empty() {
+                voices.push(name.clone());
+            }
+            version = fnv(&bytes, version);
+            let file = format!("piper/{stem}.ihw");
+            write(&out.join("models").join(&file), &bytes);
+            piper.push(serde_json::json!({
+                "name": name, "file": file, "bytes": bytes.len(), "voices": voices,
+            }));
+        }
+    }
     let manifest = serde_json::json!({
         "version": format!("{version:016x}"),
         "model": { "files": files, "bytes": model.len(), "dtype": "q8" },
         "voices": names,
+        "piper": piper,
     });
     write(
         &out.join("models/manifest.json"),
         serde_json::to_string_pretty(&manifest).unwrap().as_bytes(),
     );
     println!(
-        "web: site in {} (model {:.1} MB in {} parts, {} voices)",
+        "web: site in {} (model {:.1} MB in {} parts, {} voices, {} Piper models)",
         out.display(),
         model.len() as f64 / 1e6,
         files.len(),
-        names.len()
+        names.len(),
+        piper.len()
     );
 }
 

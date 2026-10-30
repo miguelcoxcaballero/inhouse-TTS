@@ -17,8 +17,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   WASM_BINDGEN_VERSION: 0.2.129
-  # Pinned Kokoro-82M v1.0 revision (Apache-2.0) used for the bootstrap voices.
+  # Pinned Kokoro-82M v1.0 revision (Apache-2.0): English voices.
   KOKORO_REV: f3ff3571791e39611d31c381e3a41a3af07b4987
+  # Pinned rhasspy/piper-voices revision (MIT): Spanish voices.
+  PIPER_REV: 5041a7a49ae5b3a0f30e6837769eb03fdbb231bd
 
 jobs:
   build:
@@ -43,7 +45,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: kokoro
-          key: kokoro-${{ env.KOKORO_REV }}-v2
+          key: kokoro-${{ env.KOKORO_REV }}-en-v1
       - name: Download Kokoro-82M (Apache-2.0)
         if: steps.kokoro.outputs.cache-hit != 'true'
         run: |
@@ -54,13 +56,31 @@ jobs:
           curl -fsSL --retry 5 -o kokoro/kokoro-v1_0.pth "$base/kokoro-v1_0.pth"
           for v in af_alloy af_aoede af_bella af_heart af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky \
                    am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa \
-                   bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis \
-                   ef_dora em_alex em_santa ff_siwis hf_alpha hf_beta hm_omega hm_psi if_sara im_nicola \
-                   pf_dora pm_alex pm_santa; do
+                   bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis; do
             curl -fsSL --retry 5 -o "kokoro/voices/$v.pt" "$base/voices/$v.pt"
           done
+      - name: Cache Piper voices
+        id: piper
+        uses: actions/cache@v4
+        with:
+          path: piper
+          key: piper-${{ env.PIPER_REV }}-v1
+      - name: Download Piper voices (MIT)
+        if: steps.piper.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          base="https://huggingface.co/rhasspy/piper-voices/resolve/${PIPER_REV}"
+          mkdir -p piper
+          for v in es/es_ES/davefx/medium/es_ES-davefx-medium \
+                   es/es_ES/sharvard/medium/es_ES-sharvard-medium \
+                   es/es_MX/ald/medium/es_MX-ald-medium \
+                   es/es_AR/daniela/high/es_AR-daniela-high; do
+            f=$(basename "$v")
+            curl -fsSL --retry 5 -o "piper/$f.onnx" "$base/$v.onnx"
+            curl -fsSL --retry 5 -o "piper/$f.onnx.json" "$base/$v.onnx.json"
+          done
       - name: Build the site (Rust → WebAssembly, model conversion)
-        run: cargo xtask web --kokoro kokoro --out web/dist
+        run: cargo xtask web --kokoro kokoro --piper piper --out web/dist
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

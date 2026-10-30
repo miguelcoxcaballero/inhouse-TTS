@@ -4,13 +4,15 @@
 //! accents, written entirely in Rust. This crate ties the text front end
 //! ([`inhouse_tts_text`]) to the neural engine ([`inhouse_tts_core`]).
 //!
+//! Spanish voices are Piper models run by our engine; English voices use
+//! the K82 model.
+//!
 //! ```no_run
 //! use inhouse_tts::{Engine, SpeakOptions};
-//! let model = std::fs::read("k82-q8.ihw").unwrap();
-//! let voices = std::fs::read("voices.ihw").unwrap();
-//! let mut tts = Engine::new(&model, Default::default()).unwrap();
-//! tts.add_voices(&voices).unwrap();
-//! let opts = SpeakOptions { locale: "es-MX".into(), voice: "ef_dora".into(), ..Default::default() };
+//! let mut tts = Engine::without_model();
+//! let voice = std::fs::read("models/piper/es_MX-ald-medium.ihw").unwrap();
+//! tts.add_piper("es_MX-ald", &voice).unwrap();
+//! let opts = SpeakOptions { locale: "es-MX".into(), voice: "es_MX-ald".into(), ..Default::default() };
 //! for chunk in tts.stream("Hola, ¿qué tal? Esto es Inhouse TTS.", &opts).unwrap() {
 //!     let chunk = chunk.unwrap();
 //!     println!("{} samples for {}", chunk.audio.len(), chunk.phonemes);
@@ -273,6 +275,16 @@ impl Engine {
 
     pub fn has_model(&self) -> bool {
         self.model.is_some()
+    }
+
+    /// Loads (or replaces) the K82 model, e.g. on first use of a K82 voice.
+    pub fn load_model(&mut self, model: &[u8], opts: LoadOptions) -> Result<()> {
+        self.model = Some(K82::load(WeightFile::parse(model)?, opts)?);
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu = None;
+        }
+        Ok(())
     }
 
     /// Adds a Piper voice (`.ihw` written by `piper::convert`) under `name`;
