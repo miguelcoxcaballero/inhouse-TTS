@@ -24,6 +24,7 @@ OPTIONS:
   -o, --out FILE      output WAV (default out.wav); '-' writes to stdout
       --model FILE    K82 model (.ihw)   [env INHOUSE_TTS_MODEL, default models/k82.ihw]
       --voices FILE   voice pack (.ihw)  [env INHOUSE_TTS_VOICES, default models/voices.ihw]
+      --piper DIR     Piper voices (.ihw) [env INHOUSE_TTS_PIPER, default models/piper]
       --seed N        noise seed (default 1)
       --stream        write one WAV per chunk as soon as it is ready
       --gpu           run the decoder on the GPU (Vulkan, Metal or DX12)
@@ -43,7 +44,7 @@ fn opt(args: &[String], long: &str, short: &str) -> Option<String> {
 fn positional(args: &[String]) -> Option<String> {
     let takes_value = [
         "-l", "--locale", "-v", "--voice", "-s", "--speed", "-o", "--out", "--model", "--voices",
-        "--seed",
+        "--seed", "--piper",
     ];
     let mut out = Vec::new();
     let mut i = 1;
@@ -69,6 +70,19 @@ fn die(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1)
 }
 
+/// Voice name of a Piper file: `es_ES-davefx-medium.ihw` → `es_ES-davefx`.
+fn piper_name(path: &std::path::Path) -> String {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    ["-x_low", "-low", "-medium", "-high"]
+        .iter()
+        .find_map(|q| stem.strip_suffix(q))
+        .unwrap_or(&stem)
+        .to_string()
+}
+
+/// Loads the K82 model and voice pack when present (English voices) and
+/// every Piper voice in the Piper directory. A missing K82 model is fine
+/// when Piper voices are available.
 fn load_engine(args: &[String]) -> Engine {
     let model = arg(args, "--model")
         .or_else(|| std::env::var("INHOUSE_TTS_MODEL").ok())
@@ -76,23 +90,43 @@ fn load_engine(args: &[String]) -> Engine {
     let voices = arg(args, "--voices")
         .or_else(|| std::env::var("INHOUSE_TTS_VOICES").ok())
         .unwrap_or_else(|| "models/voices.ihw".into());
-    let bytes = std::fs::read(&model).unwrap_or_else(|e| {
-        die(format!(
-            "cannot read model {model}: {e} (see README: models)"
-        ))
-    });
+    let piper = arg(args, "--piper")
+        .or_else(|| std::env::var("INHOUSE_TTS_PIPER").ok())
+        .unwrap_or_else(|| "models/piper".into());
     let gpu = args.iter().any(|a| a == "--gpu");
-    let opts = LoadOptions {
-        gpu,
-        ..Default::default()
+    let mut engine = match std::fs::read(&model) {
+        Ok(bytes) => {
+            let opts = LoadOptions {
+                gpu,
+                ..Default::default()
+            };
+            let mut e = Engine::new(&bytes, opts).unwrap_or_else(|e| die(e));
+            if gpu {
+                enable_gpu(&mut e);
+            }
+            let vb = std::fs::read(&voices)
+                .unwrap_or_else(|e| die(format!("cannot read voices {voices}: {e}")));
+            e.add_voices(&vb).unwrap_or_else(|e| die(e));
+            e
+        }
+        Err(_) => Engine::without_model(),
     };
-    let mut engine = Engine::new(&bytes, opts).unwrap_or_else(|e| die(e));
-    if gpu {
-        enable_gpu(&mut engine);
+    let mut files: Vec<_> = std::fs::read_dir(&piper)
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.retain(|p| p.extension().is_some_and(|e| e == "ihw"));
+    files.sort();
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap_or_else(|e| die(format!("{}: {e}", f.display())));
+        engine
+            .add_piper(&piper_name(f), &bytes)
+            .unwrap_or_else(|e| die(format!("{}: {e}", f.display())));
     }
-    let vb =
-        std::fs::read(&voices).unwrap_or_else(|e| die(format!("cannot read voices {voices}: {e}")));
-    engine.add_voices(&vb).unwrap_or_else(|e| die(e));
+    if !engine.has_model() && files.is_empty() {
+        die(format!(
+            "no voices: neither {model} nor Piper voices in {piper} (see README: models)"
+        ));
+    }
     engine
 }
 

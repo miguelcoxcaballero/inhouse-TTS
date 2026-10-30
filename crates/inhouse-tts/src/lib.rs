@@ -27,10 +27,14 @@ use inhouse_tts_core::model::k82::gpu::K82Gpu;
 use inhouse_tts_core::model::k82::{
     InferOptions, LoadOptions, K82, MAX_TOKENS, SAMPLES_PER_FRAME, SAMPLE_RATE as SR,
 };
+use inhouse_tts_core::model::piper::Piper;
+use inhouse_tts_core::resample::Resampler;
 use inhouse_tts_core::WeightFile;
+use inhouse_tts_text::piper::{piper_lang, piper_sentences};
 use inhouse_tts_text::{chunk_phonemes, ChunkPlan, Frontend, Locale};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 pub const SAMPLE_RATE: u32 = SR;
 const STYLE: usize = 256;
@@ -54,11 +58,18 @@ impl From<inhouse_tts_core::weights::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A voice: one 256-d style vector per utterance length (Kokoro voice pack).
+/// A voice: either a K82 style pack (one 256-d style vector per utterance
+/// length) or one speaker of a Piper model.
 #[derive(Clone)]
 pub struct Voice {
     pub name: String,
-    pack: Vec<f32>,
+    kind: Kind,
+}
+
+#[derive(Clone)]
+enum Kind {
+    Style(Vec<f32>),
+    Piper { model: Arc<Piper>, speaker: usize },
 }
 
 impl Voice {
@@ -68,27 +79,46 @@ impl Voice {
         }
         Ok(Voice {
             name: name.to_string(),
-            pack,
+            kind: Kind::Style(pack),
         })
     }
 
-    /// Style vector for an utterance of `tokens` phonemes.
-    pub fn style(&self, tokens: usize) -> &[f32] {
-        let rows = self.pack.len() / STYLE;
+    /// Style vector for an utterance of `tokens` phonemes (K82 voices only).
+    pub fn style(&self, tokens: usize) -> Option<&[f32]> {
+        let Kind::Style(pack) = &self.kind else {
+            return None;
+        };
+        let rows = pack.len() / STYLE;
         let r = tokens.saturating_sub(1).min(rows - 1);
-        &self.pack[r * STYLE..(r + 1) * STYLE]
+        Some(&pack[r * STYLE..(r + 1) * STYLE])
     }
 
-    /// Weighted mix of voices (voice design / blending).
+    /// Language of a Piper voice (`es-ES`, `en-US`…); `None` for K82 voices,
+    /// whose language is in the name ([`voice_info`]).
+    pub fn language(&self) -> Option<String> {
+        match &self.kind {
+            Kind::Piper { model, .. } => Some(model.language().replace('_', "-")),
+            Kind::Style(_) => None,
+        }
+    }
+
+    /// Weighted mix of K82 voices (voice design / blending).
     pub fn blend(name: &str, parts: &[(&Voice, f32)]) -> Result<Voice> {
         let total: f32 = parts.iter().map(|(_, w)| *w).sum();
         if parts.is_empty() || total <= 0.0 {
             return Err(Error("empty voice blend".into()));
         }
-        let len = parts.iter().map(|(v, _)| v.pack.len()).min().unwrap();
+        let packs: Vec<(&Vec<f32>, f32)> = parts
+            .iter()
+            .map(|(v, w)| match &v.kind {
+                Kind::Style(p) => Ok((p, *w)),
+                Kind::Piper { .. } => Err(Error(format!("voice {} cannot be blended", v.name))),
+            })
+            .collect::<Result<_>>()?;
+        let len = packs.iter().map(|(p, _)| p.len()).min().unwrap();
         let mut pack = vec![0f32; len];
-        for (v, w) in parts {
-            for (o, x) in pack.iter_mut().zip(&v.pack) {
+        for (p, w) in packs {
+            for (o, x) in pack.iter_mut().zip(p) {
                 *o += x * w / total;
             }
         }
@@ -104,7 +134,46 @@ pub struct VoiceInfo {
     pub label: String,
 }
 
+/// Piper voices shipped with Inhouse TTS: name prefix and whether the
+/// speaker is a woman.
+const PIPER_GENDER: &[(&str, bool)] = &[
+    ("es_ES-davefx", false),
+    ("es_ES-sharvard-M", false),
+    ("es_ES-sharvard-F", true),
+    ("es_MX-ald", false),
+    ("es_AR-daniela", true),
+];
+
 pub fn voice_info(name: &str) -> VoiceInfo {
+    // Piper voices: `es_ES-davefx`, `es_ES-sharvard-F`.
+    if name.len() > 6 && name.as_bytes()[2] == b'_' && name.as_bytes()[5] == b'-' {
+        let language = match &name[..5] {
+            "es_ES" => "es-ES",
+            "es_MX" => "es-MX",
+            "es_AR" => "es-AR",
+            "en_US" => "en-US",
+            "en_GB" => "en-GB",
+            _ => "",
+        };
+        let female = PIPER_GENDER
+            .iter()
+            .find(|(p, _)| name.starts_with(p))
+            .is_some_and(|(_, f)| *f);
+        let base = name[6..].split('-').next().unwrap_or("");
+        let mut label: String = base
+            .chars()
+            .take(1)
+            .flat_map(char::to_uppercase)
+            .chain(base.chars().skip(1))
+            .collect();
+        label.push_str(if female { " (F)" } else { " (M)" });
+        return VoiceInfo {
+            name: name.to_string(),
+            language,
+            female,
+            label,
+        };
+    }
     let mut c = name.chars();
     let lang = match c.next() {
         Some('a') => "en-US",
@@ -172,9 +241,12 @@ pub struct Chunk {
 }
 
 pub struct Engine {
-    model: K82,
+    /// The K82 model, needed only by K82 voices.
+    model: Option<K82>,
     voices: BTreeMap<String, Voice>,
     frontend: Frontend,
+    /// Converters from each Piper sample rate to [`SAMPLE_RATE`].
+    resamplers: Mutex<BTreeMap<u32, Arc<Resampler>>>,
     #[cfg(feature = "gpu")]
     gpu: Option<K82Gpu>,
 }
@@ -182,22 +254,67 @@ pub struct Engine {
 impl Engine {
     /// Loads a `.ihw` K82 model.
     pub fn new(model: &[u8], opts: LoadOptions) -> Result<Engine> {
-        let model = K82::load(WeightFile::parse(model)?, opts)?;
-        Ok(Engine {
-            model,
+        let mut e = Engine::without_model();
+        e.model = Some(K82::load(WeightFile::parse(model)?, opts)?);
+        Ok(e)
+    }
+
+    /// An engine for Piper voices only (no K82 model).
+    pub fn without_model() -> Engine {
+        Engine {
+            model: None,
             voices: BTreeMap::new(),
             frontend: Frontend::new(),
+            resamplers: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "gpu")]
             gpu: None,
-        })
+        }
+    }
+
+    pub fn has_model(&self) -> bool {
+        self.model.is_some()
+    }
+
+    /// Adds a Piper voice (`.ihw` written by `piper::convert`) under `name`;
+    /// multi-speaker models add one voice per speaker, `name-<speaker>`.
+    /// Returns the voice names.
+    pub fn add_piper(&mut self, name: &str, bytes: &[u8]) -> Result<Vec<String>> {
+        let prepack = !cfg!(target_arch = "wasm32");
+        let model = Arc::new(Piper::load(WeightFile::parse(bytes)?, prepack)?);
+        let speakers: Vec<(String, usize)> = if model.speakers().is_empty() {
+            vec![(name.to_string(), 0)]
+        } else {
+            model
+                .speakers()
+                .iter()
+                .map(|(s, &i)| (format!("{name}-{s}"), i))
+                .collect()
+        };
+        for (n, speaker) in &speakers {
+            self.voices.insert(
+                n.clone(),
+                Voice {
+                    name: n.clone(),
+                    kind: Kind::Piper {
+                        model: model.clone(),
+                        speaker: *speaker,
+                    },
+                },
+            );
+        }
+        Ok(speakers.into_iter().map(|(n, _)| n).collect())
     }
 
     /// Moves the decoder and vocoder to the GPU and returns the adapter
     /// name. The model must be loaded with `LoadOptions { gpu: true, .. }`.
     #[cfg(feature = "gpu")]
     pub async fn enable_gpu(&mut self, opts: GpuOptions) -> Result<String> {
+        let model = self
+            .model
+            .as_ref()
+            .ok_or_else(|| Error("no K82 model loaded".into()))?;
         let gpu = inhouse_tts_core::gpu::Gpu::new(opts).await.map_err(Error)?;
-        let g = K82Gpu::new(gpu, &self.model).map_err(Error)?;
+        let g = K82Gpu::new(gpu, model).map_err(Error)?;
         let name = g.name().to_string();
         self.gpu = Some(g);
         Ok(name)
@@ -299,8 +416,8 @@ impl Engine {
         Ok(chunk_phonemes(&ps, opts.plan))
     }
 
-    fn ids(&self, phonemes: &str) -> Vec<u32> {
-        let ids = self.model.tokenize(phonemes);
+    fn ids(model: &K82, phonemes: &str) -> Vec<u32> {
+        let ids = model.tokenize(phonemes);
         if ids.len() > MAX_TOKENS + 2 {
             [&ids[..MAX_TOKENS + 1], &[0]].concat()
         } else {
@@ -311,18 +428,88 @@ impl Engine {
     /// Synthesises one phoneme chunk (≤ 510 symbols). Natively the decoder
     /// runs on the GPU when [`Engine::enable_gpu`] succeeded.
     pub fn synth_phonemes(&self, phonemes: &str, voice: &Voice, opts: &SpeakOptions) -> Vec<f32> {
-        let ids = self.ids(phonemes);
-        let style = voice.style(ids.len() - 2);
-        let inp = self.model.prepare(&ids, style, infer_options(opts));
+        if let Kind::Piper { model, speaker } = &voice.kind {
+            return self.synth_piper(phonemes, model, *speaker, opts);
+        }
+        let Some(model) = &self.model else {
+            eprintln!("voice {} needs the K82 model", voice.name);
+            return Vec::new();
+        };
+        let ids = Self::ids(model, phonemes);
+        let style = voice.style(ids.len() - 2).unwrap_or_default();
+        let inp = model.prepare(&ids, style, infer_options(opts));
         #[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
         if let Some(g) = &self.gpu {
-            match inhouse_tts_core::gpu::block_on(g.decode(&self.model, &inp, style)) {
+            match inhouse_tts_core::gpu::block_on(g.decode(model, &inp, style)) {
                 Ok(audio) => return finish(audio, &inp.durations, phonemes, opts),
                 Err(e) => eprintln!("GPU decoder failed ({e}); using the CPU"),
             }
         }
-        let audio = self.model.decode(&inp, style);
+        let audio = model.decode(&inp, style);
         finish(audio, &inp.durations, phonemes, opts)
+    }
+
+    /// Piper synthesis: our phonemes are converted to the espeak-style IPA
+    /// the voice was trained on, synthesised sentence by sentence, trimmed
+    /// and resampled to [`SAMPLE_RATE`].
+    fn synth_piper(
+        &self,
+        phonemes: &str,
+        model: &Piper,
+        speaker: usize,
+        opts: &SpeakOptions,
+    ) -> Vec<f32> {
+        let lang = piper_lang(&model.language().replace('_', "-"))
+            .or_else(|| piper_lang(&opts.locale))
+            .unwrap_or(inhouse_tts_text::piper::PiperLang::Es);
+        let hop = model.hop();
+        let rate = model.sample_rate as usize;
+        let mut po = model.defaults();
+        po.length_scale /= opts.speed.clamp(0.3, 3.0);
+        let mut out = Vec::new();
+        for (i, s) in piper_sentences(phonemes, lang).iter().enumerate() {
+            po.seed = opts.seed.wrapping_add(i as u64);
+            let ids = model.encode(s);
+            let o = match model.synthesize(&ids, speaker, po) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("piper: {}", e.0);
+                    continue;
+                }
+            };
+            let d = &o.durations;
+            let (mut a, mut b) = (0, o.audio.len());
+            if opts.trim_silence && d.len() >= 4 {
+                // ^ and the first pad lead, the last pad and $ trail.
+                a = ((d[0] + d[1]) * hop).saturating_sub(rate / 20);
+                let tail = (d[d.len() - 1] + d[d.len() - 2]) * hop;
+                b = o
+                    .audio
+                    .len()
+                    .saturating_sub(tail.saturating_sub(rate / 10))
+                    .max(a);
+            }
+            out.extend_from_slice(&o.audio[a..b]);
+            if opts.trim_silence {
+                let ms = if s.ends_with(['.', '!', '?']) {
+                    180
+                } else {
+                    60
+                };
+                out.extend(std::iter::repeat_n(0.0, rate * ms / 1000));
+            }
+        }
+        if model.sample_rate == SAMPLE_RATE {
+            return out;
+        }
+        let r = {
+            let mut cache = self.resamplers.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .entry(model.sample_rate)
+                .or_insert_with(|| Arc::new(Resampler::new(model.sample_rate, SAMPLE_RATE)))
+                .clone()
+        };
+        r.process(&out)
     }
 
     /// Like [`Engine::synth_phonemes`], but awaits the GPU instead of
@@ -335,12 +522,18 @@ impl Engine {
         voice: &Voice,
         opts: &SpeakOptions,
     ) -> Result<Vec<f32>> {
-        let ids = self.ids(phonemes);
-        let style = voice.style(ids.len() - 2);
-        let inp = self.model.prepare(&ids, style, infer_options(opts));
+        let Some(model) = &self.model else {
+            return Ok(self.synth_phonemes(phonemes, voice, opts));
+        };
+        if voice.style(0).is_none() {
+            return Ok(self.synth_phonemes(phonemes, voice, opts));
+        }
+        let ids = Self::ids(model, phonemes);
+        let style = voice.style(ids.len() - 2).unwrap_or_default();
+        let inp = model.prepare(&ids, style, infer_options(opts));
         let audio = match &self.gpu {
-            Some(g) => g.decode(&self.model, &inp, style).await.map_err(Error)?,
-            None => self.model.decode(&inp, style),
+            Some(g) => g.decode(model, &inp, style).await.map_err(Error)?,
+            None => model.decode(&inp, style),
         };
         Ok(finish(audio, &inp.durations, phonemes, opts))
     }
