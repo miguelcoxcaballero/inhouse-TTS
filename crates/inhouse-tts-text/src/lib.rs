@@ -9,6 +9,7 @@ pub mod en;
 pub mod es;
 pub mod locale;
 pub mod phone;
+pub mod piper;
 pub mod scan;
 
 pub use chunk::{chunk_phonemes, ChunkPlan};
