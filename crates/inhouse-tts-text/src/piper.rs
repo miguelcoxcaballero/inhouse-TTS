@@ -55,7 +55,8 @@ pub fn espeak_voice_locale(voice: &str) -> Option<&'static str> {
 
 /// Converts our phoneme output (one or more sentences) to espeak-style IPA,
 /// one NFD-normalised string per sentence, ready for a voice's
-/// `phoneme_id_map`.
+/// `phoneme_id_map`. For text with several paragraphs use
+/// [`piper_paragraphs`].
 pub fn piper_sentences(phonemes: &str, lang: PiperLang) -> Vec<String> {
     punctuate(phonemes)
         .into_iter()
@@ -69,6 +70,24 @@ pub fn piper_sentences(phonemes: &str, lang: PiperLang) -> Vec<String> {
         })
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Converts paragraphs from [`crate::Frontend::phonemize_paragraphs`] to
+/// Piper sentences. Every paragraph ends its last sentence with a terminator
+/// (`.` when it has none), so a paragraph ending in `…`, a closing quote or a
+/// bracket does not run into the next one.
+pub fn piper_paragraphs<S: AsRef<str>>(paragraphs: &[S], lang: PiperLang) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in paragraphs {
+        let mut sentences = piper_sentences(p.as_ref(), lang);
+        if let Some(last) = sentences.last_mut() {
+            if !last.ends_with(is_terminator) {
+                last.push('.');
+            }
+        }
+        out.extend(sentences);
+    }
+    out
 }
 
 /// Characters espeak never emits and the voices never saw.
@@ -90,31 +109,47 @@ enum Tok {
 /// it and splits into sentences after `.`, `?` and `!`.
 ///
 /// - quotes, brackets and inverted marks are dropped;
-/// - em/en dashes become `;` (espeak ends a clause on them);
-/// - `…` and `...` become `,`: the voices never saw an ellipsis symbol and a
-///   comma pause is better than Piper merging the neighbouring words;
-/// - a run of marks collapses to its terminators, or else to one clause mark
-///   (`;` / `:` before `,`); a clause mark at the very end (a trailing
-///   ellipsis) becomes `.`;
+/// - em/en dashes end a clause with `;`, except the opening dash of a pair
+///   (`dˈixo— em bˈoθ βˈaxa— ke`), which is dropped: espeak only breaks on
+///   the closing one. Our front end glues every dash to the word before, so
+///   pairs are told apart by position within the sentence;
+/// - `…` and runs of three or more dots become `,`: the voices never saw an
+///   ellipsis symbol and a comma pause is better than Piper merging the
+///   neighbouring words; `..` is ignored, as espeak does;
+/// - a run of marks collapses to its first terminator (espeak emits exactly
+///   one), or else to one clause mark (`;` / `:` before `,`); a clause mark
+///   at the very end (a trailing ellipsis) becomes `.`;
 /// - words are separated by one space and marks are glued to the word before.
 fn punctuate(text: &str) -> Vec<String> {
-    let text = text.replace("...", "…");
     let mut toks = Vec::new();
     let mut word = String::new();
-    for c in text.chars() {
-        let mark = match c {
-            '—' | '–' => Some(';'),
-            '…' => Some(','),
-            c if KEPT.contains(c) => Some(c),
-            _ => None,
-        };
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
         if DROPPED.contains(c) {
             continue;
         }
-        if mark.is_none() && !c.is_whitespace() {
+        let mark = match c {
+            '—' | '–' => Some(Some(DASH)),
+            '…' => Some(Some(',')),
+            '.' => {
+                let mut dots = 1;
+                while chars.next_if_eq(&'.').is_some() {
+                    dots += 1;
+                }
+                Some(match dots {
+                    1 => Some('.'),
+                    2 => None,
+                    _ => Some(','),
+                })
+            }
+            c if KEPT.contains(c) => Some(Some(c)),
+            c if c.is_whitespace() => Some(None),
+            _ => None,
+        };
+        let Some(mark) = mark else {
             word.push(c);
             continue;
-        }
+        };
         if !word.is_empty() {
             toks.push(Tok::Word(std::mem::take(&mut word)));
         }
@@ -128,6 +163,8 @@ fn punctuate(text: &str) -> Vec<String> {
 
     let mut sentences = Vec::new();
     let mut cur = String::new();
+    // An opening dash was dropped and its closing one is still to come.
+    let mut dash_open = false;
     let mut i = 0;
     while i < toks.len() {
         match &toks[i] {
@@ -148,17 +185,30 @@ fn punctuate(text: &str) -> Vec<String> {
                 if cur.is_empty() {
                     continue;
                 }
-                let terms: String = run.chars().filter(|&c| is_terminator(c)).collect();
-                if !terms.is_empty() {
-                    cur.push_str(&terms);
+                if let Some(t) = run.chars().find(|&c| is_terminator(c)) {
+                    cur.push(t);
                     sentences.push(std::mem::take(&mut cur));
-                } else if i == toks.len() {
+                    dash_open = false;
+                    continue;
+                }
+                if run.contains(DASH) {
+                    if dash_open {
+                        dash_open = false;
+                    } else if dash_later(&toks[i..]) {
+                        dash_open = true;
+                        run.retain(|c| c != DASH);
+                    }
+                }
+                if run.is_empty() {
+                    continue;
+                }
+                if i == toks.len() {
                     cur.push('.');
                 } else {
                     cur.push(
                         [';', ':']
                             .into_iter()
-                            .find(|&m| run.contains(m))
+                            .find(|&m| run.contains(m) || (m == ';' && run.contains(DASH)))
                             .unwrap_or(','),
                     );
                 }
@@ -169,6 +219,21 @@ fn punctuate(text: &str) -> Vec<String> {
         sentences.push(cur);
     }
     sentences
+}
+
+/// Internal mark for an em/en dash during [`punctuate`].
+const DASH: char = '—';
+
+/// True if another dash follows before the end of the sentence.
+fn dash_later(toks: &[Tok]) -> bool {
+    for t in toks {
+        match t {
+            Tok::Punct(DASH) => return true,
+            Tok::Punct(c) if is_terminator(*c) => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Replaces the capital-letter diphthong shorthands and ligatures.
@@ -548,8 +613,67 @@ mod tests {
         assert_eq!(p("pwˈes…"), ["pwˈes."]);
         assert_eq!(p("(ˈuno) , [dˈos]:tɾˈes ,."), ["ˈuno, dˈos: tɾˈes."]);
         assert_eq!(p("¿kˈe?  ¡nˈaða!  …  βˈale"), ["kˈe?", "nˈaða!", "βˈale"]);
-        assert_eq!(p("kˈe?! βˈale"), ["kˈe?!", "βˈale"]);
         assert!(p(" “ ” ").is_empty());
+    }
+
+    /// espeak emits exactly one terminator per sentence, the first of a run,
+    /// and does not end a sentence on `..`.
+    #[test]
+    fn repeated_marks() {
+        let p = |s| piper_sentences(s, PiperLang::Es);
+        assert_eq!(p("ˈola!!! nˈo???"), ["ˈola!", "nˈo?"]);
+        assert_eq!(p("kˈe?! βˈale"), ["kˈe?", "βˈale"]);
+        assert_eq!(p("ˈola!? bjˈen.!"), ["ˈola!", "bjˈen."]);
+        assert_eq!(p("ˈola.. aðjˈos"), ["ˈola aðjˈos"]);
+        assert_eq!(p("ˈola.... bjˈen."), ["ˈola, bjˈen."]);
+        assert_eq!(p("ˈola...."), ["ˈola."]);
+    }
+
+    /// Only the closing dash of a pair ends a clause; a lone dash does too.
+    #[test]
+    fn dashes() {
+        let p = |s| piper_sentences(s, PiperLang::Es);
+        assert_eq!(
+            p("ˈel ðˈixo— em bˈoθ βˈaxa— ke nˈo."),
+            ["ˈel ðˈixo em bˈoθ βˈaxa; ke nˈo."]
+        );
+        assert_eq!(p("sˈi— dˈixo ˈel."), ["sˈi; dˈixo ˈel."]);
+        // The pair is closed by the sentence end; the next sentence starts afresh.
+        assert_eq!(
+            p("ˈola— dˈixo ˈel—. ˈuno— dˈos."),
+            ["ˈola dˈixo ˈel.", "ˈuno; dˈos."]
+        );
+        assert_eq!(p("ˈa— ˈbe— ˈθe— ˈde— ˈe."), ["ˈa ˈbe; ˈθe ˈde; ˈe."]);
+        assert_eq!(p("ˈa—, ˈbe— ˈθe"), ["ˈa, ˈbe; ˈθe"]);
+    }
+
+    /// A paragraph ending without a terminator (`…`, a closing quote or
+    /// bracket) stays a sentence of its own.
+    #[test]
+    fn paragraphs() {
+        let mut fe = crate::Frontend::new();
+        let locale = crate::find_locale("es-ES").unwrap();
+        let run = |fe: &mut crate::Frontend, text| {
+            let paras = fe.phonemize_paragraphs(text, locale).unwrap();
+            piper_paragraphs(&paras, PiperLang::Es)
+        };
+        assert_eq!(
+            run(&mut fe, "Pues…\nOtro día empezó."),
+            ["pwes.", "ˈotɾo ðˈiʲa ˌempeθˈo."]
+        );
+        assert_eq!(
+            run(&mut fe, "Dijo «hola»\nY se fue."),
+            ["dˈixo ˈola.", "i se fwˈe."]
+        );
+        assert_eq!(
+            run(&mut fe, "Hola (amigo)\n\nAdiós."),
+            ["ˈola amˈiɣo.", "aðjˈos."]
+        );
+        // The joined form is unchanged.
+        let joined = fe.phonemize("Pues…\nOtro día.", locale).unwrap();
+        assert_eq!(joined, "pwes… ˈotɾo ðˈia.");
+        assert_eq!(piper_paragraphs(&["ˈola?"], PiperLang::Es), ["ˈola?"]);
+        assert!(piper_paragraphs::<&str>(&[], PiperLang::Es).is_empty());
     }
 
     #[test]

@@ -55,6 +55,17 @@ impl Frontend {
 
     /// Converts text to model phonemes for a locale.
     pub fn phonemize(&mut self, text: &str, locale: &Locale) -> Result<String, String> {
+        Ok(self.phonemize_paragraphs(text, locale)?.join(" "))
+    }
+
+    /// Like [`Frontend::phonemize`], but keeps one string per non-empty line,
+    /// so callers that drop closing quotes or brackets (see
+    /// [`piper::piper_paragraphs`]) do not lose the paragraph break.
+    pub fn phonemize_paragraphs(
+        &mut self,
+        text: &str,
+        locale: &Locale,
+    ) -> Result<Vec<String>, String> {
         // Paragraph breaks act as sentence ends.
         let text = text.replace("\r\n", "\n");
         let mut parts = Vec::new();
@@ -82,6 +93,6 @@ impl Frontend {
             let ends = ps.ends_with(['.', '!', '?', '…', '”', ')']);
             parts.push(if ends { ps } else { format!("{ps}.") });
         }
-        Ok(parts.join(" "))
+        Ok(parts)
     }
 }
