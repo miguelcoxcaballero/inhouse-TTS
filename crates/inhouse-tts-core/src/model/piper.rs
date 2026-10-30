@@ -84,6 +84,12 @@ impl Default for PiperOptions {
     }
 }
 
+/// Longest output [`Piper::synthesize`] produces, in seconds. Piper
+/// synthesises sentence by sentence; a larger total means extreme
+/// `noise_w`/`length_scale` (durations grow as `exp` of the noise) and
+/// would otherwise exhaust memory, which aborts instead of returning `Err`.
+pub const MAX_SECONDS: f64 = 600.0;
+
 pub struct PiperOutput {
     pub audio: Vec<f32>,
     /// Frames per input id (one frame = product of the upsample rates).
@@ -101,11 +107,28 @@ fn json_err(what: &str, e: serde_json::Error) -> Error {
 /// Prefixes of the network's own tensors (graph constants are dropped).
 const PREFIXES: [&str; 5] = ["enc_p.", "dp.", "flow.", "dec.", "emb_g."];
 
+/// Wrapper prefixes some exports put before the module path
+/// (`model_g.enc_p.emb.weight`).
+const WRAPPERS: [&str; 1] = ["model_g."];
+
+/// The clean name of a network parameter, `None` for graph constants.
+fn param_name(name: &str) -> Option<&str> {
+    let n = WRAPPERS
+        .iter()
+        .find_map(|w| name.strip_prefix(w))
+        .unwrap_or(name);
+    PREFIXES.iter().any(|p| n.starts_with(p)).then_some(n)
+}
+
 /// Matrices stored as int8 with `DType::Q8`; the rest of the network stays
-/// in f16. Waveform SNR against f32 (davefx-medium): all f16 43 dB, plus
-/// int8 generator 29 dB, int8 flow 21 dB, int8 text encoder changes the
-/// durations. The generator is only ~1.4 M parameters, so f16 is the
-/// recommended storage and `Q8` saves little on top of it.
+/// in f16. Waveform SNR against f32 (davefx-medium, 27 ids): all f16 43 dB,
+/// plus int8 generator 29 dB, int8 flow 21 dB, int8 text encoder changes
+/// the durations. f16 itself moves a duration by one frame where its value
+/// sits next to a whole frame: 1 of 691 ids (sharvard) and 2 of 1019 ids
+/// (carlfm). Only an f32 text encoder and duration predictor avoid that on
+/// these inputs, at +44% size (davefx 31.5 → 45.2 MB). The generator is
+/// only ~1.4 M parameters, so f16 is the recommended storage and `Q8`
+/// saves little on top of it.
 fn q8_tensor(name: &str) -> bool {
     name.starts_with("dec.resblocks.") || name.starts_with("dec.ups.")
 }
@@ -124,6 +147,90 @@ fn module_name(node: &str) -> String {
     m.trim_start_matches('/').replace('/', ".")
 }
 
+/// Module of a convolution node: taken from its named weight or bias when
+/// it has one (older exports name nodes `Conv_32`, newer ones fold the
+/// weight norm into an anonymous constant but keep the bias), else from
+/// the node path. `None` when neither identifies it.
+fn conv_module(n: &onnx::Node, is_init: impl Fn(&str) -> bool) -> Option<String> {
+    let named = n.inputs.iter().skip(1).find_map(|i| {
+        let p = param_name(i).filter(|_| is_init(i))?;
+        p.strip_suffix(".weight")
+            .or_else(|| p.strip_suffix(".bias"))
+    });
+    match named {
+        Some(m) => Some(m.to_string()),
+        None if n.name.contains('/') => Some(module_name(&n.name)),
+        None => None,
+    }
+}
+
+/// Dilation, stride and padding of a convolution node (first spatial
+/// value; ONNX defaults when absent).
+fn conv_attrs(n: &onnx::Node) -> Result<ConvAttrs> {
+    let first = |a: &str, default: i64, min: i64| -> Result<usize> {
+        match n.ints(a).map(|v| v.first().copied()) {
+            None | Some(None) => Ok(default as usize),
+            Some(Some(v)) if v >= min => Ok(v as usize),
+            Some(Some(v)) => err(format!("piper: {} has {a} {v}", n.name)),
+        }
+    };
+    Ok(ConvAttrs {
+        dilation: first("dilations", 1, 1)?,
+        stride: first("strides", 1, 1)?,
+        pad: first("pads", 0, 0)?,
+    })
+}
+
+/// Scale `exp(-logs)` of the duration predictor's ElementwiseAffine in
+/// reverse, `(x - m) · exp(-logs)`: the other operand of the `Mul` fed by
+/// `Sub(·, dp.flows.0.m)`. Exports keep it as a folded constant or as
+/// `Exp` of a constant holding `-logs`; older checkpoints store `logs`.
+fn dp_affine_scale(
+    model: &onnx::Model,
+    init: &HashMap<&str, &onnx::Tensor>,
+) -> Result<(Vec<usize>, Vec<f32>)> {
+    let float = |name: &str| -> Option<(Vec<usize>, Vec<f32>)> {
+        let t = init.get(name)?;
+        Some((t.dims.clone(), t.floats().ok()?.to_vec()))
+    };
+    let producer: HashMap<&str, &onnx::Node> = model
+        .nodes
+        .iter()
+        .flat_map(|n| n.outputs.iter().map(move |o| (o.as_str(), n)))
+        .collect();
+    let sub = model.nodes.iter().find(|n| {
+        n.op_type == "Sub" && n.inputs.get(1).and_then(|i| param_name(i)) == Some("dp.flows.0.m")
+    });
+    let found = sub.and_then(|sub| {
+        let x = sub.outputs.first()?;
+        let mul = model
+            .nodes
+            .iter()
+            .find(|n| n.op_type == "Mul" && n.inputs.contains(x))?;
+        let other = mul.inputs.iter().find(|i| *i != x)?;
+        if let Some(v) = float(other) {
+            return Some(v);
+        }
+        let exp = producer
+            .get(other.as_str())
+            .filter(|n| n.op_type == "Exp")?;
+        let (s, v) = float(exp.inputs.first()?)?;
+        Some((s, v.iter().map(|l| l.exp()).collect()))
+    });
+    let logs = || {
+        let name = init
+            .keys()
+            .find(|k| param_name(k) == Some("dp.flows.0.logs"))?;
+        let (s, v) = float(name)?;
+        Some((s, v.iter().map(|l| (-l).exp()).collect()))
+    };
+    match found.or_else(logs) {
+        Some((s, v)) if v.len() == 2 => Ok((s, v)),
+        Some((s, _)) => err(format!("piper: dp.flows.0 scale has shape {s:?}")),
+        None => err("piper: dp.flows.0 logs not found"),
+    }
+}
+
 struct Tensors {
     map: BTreeMap<String, (Vec<usize>, Vec<f32>)>,
     attrs: HashMap<String, ConvAttrs>,
@@ -135,6 +242,17 @@ impl Tensors {
             .get(name)
             .map(|(s, _)| s.as_slice())
             .ok_or_else(|| Error(format!("piper: missing tensor {name}")))
+    }
+
+    /// Shape of `name`, which must have `rank` non-zero dimensions.
+    fn dims(&self, name: &str, rank: usize) -> Result<&[usize]> {
+        let s = self.shape(name)?;
+        if s.len() != rank || s.contains(&0) {
+            return err(format!(
+                "piper: tensor {name} has shape {s:?}, expected {rank} non-zero dims"
+            ));
+        }
+        Ok(s)
     }
 
     fn has(&self, name: &str) -> bool {
@@ -158,14 +276,16 @@ impl Tensors {
     }
 
     fn infer_config(&self) -> Result<PiperConfig> {
-        let emb = self.shape("enc_p.emb.weight")?;
+        let emb = self.dims("enc_p.emb.weight", 2)?;
         let (n_vocab, hidden) = (emb[0], emb[1]);
-        let rel = self.shape("enc_p.encoder.attn_layers.0.emb_rel_k")?;
-        if rel.len() != 3 || rel[0] != 1 {
-            return err(format!("piper: unsupported relative embedding {rel:?}"));
+        let rel = self.dims("enc_p.encoder.attn_layers.0.emb_rel_k", 3)?;
+        if rel[0] != 1 || rel[1] % 2 == 0 || !hidden.is_multiple_of(rel[2]) {
+            return err(format!(
+                "piper: unsupported relative embedding {rel:?} for hidden size {hidden}"
+            ));
         }
         let (window, d_k) = ((rel[1] - 1) / 2, rel[2]);
-        let ffn = self.shape("enc_p.encoder.ffn_layers.0.conv_1.weight")?;
+        let ffn = self.dims("enc_p.encoder.ffn_layers.0.conv_1.weight", 3)?;
         let dp_flows = self.indices_desc(|i| format!("dp.flows.{i}.pre.weight"));
         let Some(&f0) = dp_flows.first() else {
             return err("piper: duration predictor has no conv flows");
@@ -198,7 +318,7 @@ impl Tensors {
         let mut resblock_kernels = Vec::new();
         let mut resblock_dilations = Vec::new();
         for j in 0..nk {
-            resblock_kernels.push(self.shape(&format!("dec.resblocks.{j}.{conv}.0.weight"))?[2]);
+            resblock_kernels.push(self.dims(&format!("dec.resblocks.{j}.{conv}.0.weight"), 3)?[2]);
             let n = self.count(|c| format!("dec.resblocks.{j}.{conv}.{c}.weight"));
             resblock_dilations.push(
                 (0..n)
@@ -215,35 +335,50 @@ impl Tensors {
         let mut upsample_pads = Vec::new();
         for i in 0..nups {
             let a = self.attrs(&format!("dec.ups.{i}"))?;
+            let k = self.dims(&format!("dec.ups.{i}.weight"), 3)?[2];
+            if 2 * a.pad >= k {
+                return err(format!("piper: dec.ups.{i} pads {} for kernel {k}", a.pad));
+            }
             upsample_rates.push(a.stride);
             upsample_pads.push(a.pad);
-            upsample_kernels.push(self.shape(&format!("dec.ups.{i}.weight"))?[2]);
+            upsample_kernels.push(k);
         }
-        let pre = self.shape("dec.conv_pre.weight")?;
-        let proj = self.shape(&format!("dp.flows.{f0}.proj.weight"))?;
+        let pre = self.dims("dec.conv_pre.weight", 3)?;
+        let proj = self.dims(&format!("dp.flows.{f0}.proj.weight"), 3)?;
+        if proj[0] % 3 != 2 {
+            return err(format!("piper: dp.flows.{f0}.proj has {} outputs", proj[0]));
+        }
+        let enc_proj = self.dims("enc_p.proj.weight", 3)?;
+        if enc_proj[0] % 2 != 0 {
+            return err(format!("piper: enc_p.proj has {} outputs", enc_proj[0]));
+        }
+        let gin = match self.map.get("emb_g.weight") {
+            Some(_) => self.dims("emb_g.weight", 2)?[1],
+            None => 0,
+        };
         Ok(PiperConfig {
             n_vocab,
             hidden,
-            inter: self.shape("enc_p.proj.weight")?[0] / 2,
+            inter: enc_proj[0] / 2,
             filter: ffn[0],
             heads: hidden / d_k,
             d_k,
             window,
             enc_layers: self.count(|i| format!("enc_p.encoder.attn_layers.{i}.conv_q.weight")),
             ffn_kernel: ffn[2],
-            dp_filter: self.shape("dp.pre.weight")?[0],
-            dp_kernel: self.shape("dp.convs.convs_sep.0.weight")?[2],
+            dp_filter: self.dims("dp.pre.weight", 3)?[0],
+            dp_kernel: self.dims("dp.convs.convs_sep.0.weight", 3)?[2],
             dp_layers: self.count(|i| format!("dp.convs.convs_sep.{i}.weight")),
-            dp_flow_filter: self.shape(&format!("dp.flows.{f0}.pre.weight"))?[0],
+            dp_flow_filter: self.dims(&format!("dp.flows.{f0}.pre.weight"), 3)?[0],
             dp_flow_layers: self.count(|i| format!("dp.flows.{f0}.convs.convs_sep.{i}.weight")),
             dp_flows,
             spline_bins: (proj[0] + 1) / 3,
             spline_bound: 5.0,
-            flow_hidden: self.shape(&format!("flow.flows.{fl0}.pre.weight"))?[0],
-            flow_kernel: self.shape(&format!("flow.flows.{fl0}.enc.in_layers.0.weight"))?[2],
+            flow_hidden: self.dims(&format!("flow.flows.{fl0}.pre.weight"), 3)?[0],
+            flow_kernel: self.dims(&format!("flow.flows.{fl0}.enc.in_layers.0.weight"), 3)?[2],
             flow_dilations,
             flows,
-            gin: self.map.get("emb_g.weight").map_or(0, |(s, _)| s[1]),
+            gin,
             resblock: resblock.to_string(),
             resblock_kernels,
             resblock_dilations,
@@ -252,7 +387,7 @@ impl Tensors {
             upsample_pads,
             upsample_initial: pre[0],
             pre_kernel: pre[2],
-            post_kernel: self.shape("dec.conv_post.weight")?[2],
+            post_kernel: self.dims("dec.conv_post.weight", 3)?[2],
             post_bias: self.has("dec.conv_post.bias"),
         })
     }
@@ -260,8 +395,9 @@ impl Tensors {
 
 /// Converts a Piper ONNX voice (`.onnx` + `.onnx.json`) into an `.ihw`
 /// container. `dtype` is the storage of the large weight matrices: `F32`
-/// keeps everything exact, `F16` halves the size, `Q8` additionally stores
-/// the generator's residual blocks and upsamplers as int8.
+/// keeps everything exact, `F16` halves the size (a few durations may move
+/// by one frame on long inputs), `Q8` additionally stores the generator's
+/// residual blocks and upsamplers as int8.
 pub fn convert(onnx_bytes: &[u8], config_json: &[u8], dtype: DType) -> Result<Vec<u8>> {
     let model = onnx::Model::parse(onnx_bytes)?;
     let cfg: serde_json::Value =
@@ -275,36 +411,26 @@ pub fn convert(onnx_bytes: &[u8], config_json: &[u8], dtype: DType) -> Result<Ve
         let t = init.get(name)?;
         Some((t.dims.clone(), t.floats().ok()?.to_vec()))
     };
+    let graph_input = |name: &str| model.inputs.iter().any(|i| i == name);
     let mut t = Tensors {
         map: BTreeMap::new(),
         attrs: HashMap::new(),
     };
     for i in &model.initializers {
-        if PREFIXES.iter().any(|p| i.name.starts_with(p)) {
-            if let Ok(v) = i.floats() {
-                t.map.insert(i.name.clone(), (i.dims.clone(), v.to_vec()));
-            }
+        if let (Some(name), Ok(v)) = (param_name(&i.name), i.floats()) {
+            t.map.insert(name.to_string(), (i.dims.clone(), v.to_vec()));
         }
     }
     // Anonymous (weight-norm folded) convolution weights take the name of
-    // their Conv node; the embeddings take the name of their Gather.
+    // their module; the embeddings take the name of their Gather, or are
+    // recognised by the graph input they index.
     for n in &model.nodes {
         match n.op_type.as_str() {
             "Conv" | "ConvTranspose" => {
-                let m = module_name(&n.name);
-                let first = |a: &str| {
-                    n.ints(a)
-                        .and_then(|v| v.first().copied())
-                        .unwrap_or(if a == "pads" { 0 } else { 1 }) as usize
+                let Some(m) = conv_module(n, |i| init.contains_key(i)) else {
+                    continue;
                 };
-                t.attrs.insert(
-                    m.clone(),
-                    ConvAttrs {
-                        dilation: first("dilations"),
-                        stride: first("strides"),
-                        pad: first("pads"),
-                    },
-                );
+                t.attrs.insert(m.clone(), conv_attrs(n)?);
                 for (slot, suffix) in [(1, "weight"), (2, "bias")] {
                     let Some(input) = n.inputs.get(slot).filter(|s| !s.is_empty()) else {
                         continue;
@@ -317,12 +443,17 @@ pub fn convert(onnx_bytes: &[u8], config_json: &[u8], dtype: DType) -> Result<Ve
                     }
                 }
             }
-            "Gather" if n.name == "/enc_p/emb/Gather" || n.name == "/emb_g/Gather" => {
-                let key = if n.name == "/emb_g/Gather" {
-                    "emb_g.weight"
-                } else {
-                    "enc_p.emb.weight"
+            "Gather" => {
+                let key = match (n.name.as_str(), n.inputs.get(1).map(String::as_str)) {
+                    ("/enc_p/emb/Gather", _) => "enc_p.emb.weight",
+                    ("/emb_g/Gather", _) => "emb_g.weight",
+                    (_, Some("input")) if graph_input("input") => "enc_p.emb.weight",
+                    (_, Some("sid")) if graph_input("sid") => "emb_g.weight",
+                    _ => continue,
                 };
+                if t.has(key) {
+                    continue;
+                }
                 if let Some(v) = n.inputs.first().and_then(|i| float(i)) {
                     t.map.insert(key.to_string(), v);
                 }
@@ -330,14 +461,7 @@ pub fn convert(onnx_bytes: &[u8], config_json: &[u8], dtype: DType) -> Result<Ve
             _ => {}
         }
     }
-    // ElementwiseAffine reverse multiplies by exp(-logs); exports fold it.
-    let neg = if let Some(v) = float("/dp/flows.0/Exp_output_0") {
-        v
-    } else if let Some((s, logs)) = t.map.get("dp.flows.0.logs") {
-        (s.clone(), logs.iter().map(|l| (-l).exp()).collect())
-    } else {
-        return err("piper: dp.flows.0 logs not found");
-    };
+    let neg = dp_affine_scale(&model, &init)?;
     t.map.insert("dp.flows.0.exp_neg_logs".into(), neg);
     t.map.remove("dp.flows.0.logs");
 
@@ -1084,6 +1208,27 @@ fn conv_valid(
     (out, n, ostart)
 }
 
+/// Frames per id, `ceil(exp(logw) · length_scale)` as in VITS, or `Err`
+/// once the total would pass `max_frames`.
+fn frame_durations(logw: &[f32], length_scale: f32, max_frames: usize) -> Result<Vec<usize>> {
+    let mut durations = Vec::with_capacity(logw.len());
+    let mut frames = 0usize;
+    for (i, &l) in logw.iter().enumerate() {
+        // Checked as a float: casting inf or NaN to usize saturates.
+        let d = (l.exp() * length_scale).ceil();
+        let fits = d.is_finite() && d as f64 <= (max_frames - frames) as f64;
+        if !fits {
+            return err(format!(
+                "piper: duration {d} of id {i} exceeds {max_frames} frames \
+                 ({MAX_SECONDS} s, length_scale {length_scale})"
+            ));
+        }
+        frames += d as usize;
+        durations.push(d as usize);
+    }
+    Ok(durations)
+}
+
 impl Piper {
     pub fn load(mut f: WeightFile, prepack: bool) -> Result<Piper> {
         if f.header.model != "piper" {
@@ -1702,6 +1847,12 @@ impl Piper {
         opts: PiperOptions,
     ) -> Result<PiperOutput> {
         let c = &self.config;
+        let finite = [opts.noise_scale, opts.length_scale, opts.noise_w]
+            .iter()
+            .all(|v| v.is_finite());
+        if !finite || opts.length_scale <= 0.0 {
+            return err(format!("piper: invalid options {opts:?}"));
+        }
         if let Some(&bad) = ids.iter().find(|&&i| i < 0 || i as usize >= c.n_vocab) {
             return err(format!(
                 "piper: id {bad} out of range (vocabulary {})",
@@ -1730,10 +1881,10 @@ impl Piper {
         let (x, m_p, logs_p) = self.encode_text(ids);
         prof.mark("text_encoder");
         let logw = self.log_durations(&x, g, opts.noise_w, &mut rng, &mut prof);
-        let durations: Vec<usize> = logw
-            .iter()
-            .map(|l| (l.exp() * opts.length_scale).ceil().max(0.0) as usize)
-            .collect();
+        let hop: usize = c.upsample_rates.iter().product();
+        let max_frames = (MAX_SECONDS * self.sample_rate as f64 / hop as f64) as usize;
+        let durations = frame_durations(&logw, opts.length_scale, max_frames)
+            .map_err(|e| Error(format!("{} (noise_w {})", e.0, opts.noise_w)))?;
         let frames: usize = durations.iter().sum();
         let mut z = if frames == 0 {
             // VITS clamps the output length to one (all-zero) frame.
@@ -1881,5 +2032,182 @@ mod tests {
             "flow.flows.0.enc.in_layers.0"
         );
         assert_eq!(module_name("/dec/ups.2/ConvTranspose"), "dec.ups.2");
+    }
+
+    fn node(op: &str, name: &str, inputs: &[&str], outputs: &[&str]) -> onnx::Node {
+        onnx::Node {
+            op_type: op.into(),
+            name: name.into(),
+            inputs: inputs.iter().map(|s| s.to_string()).collect(),
+            outputs: outputs.iter().map(|s| s.to_string()).collect(),
+            attributes: Vec::new(),
+        }
+    }
+
+    fn tensor(name: &str, dims: &[usize], v: &[f32]) -> onnx::Tensor {
+        onnx::Tensor {
+            name: name.into(),
+            dims: dims.to_vec(),
+            data: onnx::TensorData::F32(v.to_vec()),
+        }
+    }
+
+    #[test]
+    fn names_resolve_in_every_export_layout() {
+        assert_eq!(param_name("dec.ups.0.bias"), Some("dec.ups.0.bias"));
+        assert_eq!(
+            param_name("model_g.enc_p.emb.weight"),
+            Some("enc_p.emb.weight")
+        );
+        assert_eq!(param_name("onnx::Conv_8622"), None);
+        assert_eq!(param_name("sid"), None);
+        let init = |i: &str| i != "x";
+        // pytorch 1.11: no module path, anonymous weight, named bias.
+        let n = node(
+            "Conv",
+            "Conv_5288",
+            &["x", "onnx::Conv_8622", "flow.flows.6.enc.in_layers.0.bias"],
+            &["y"],
+        );
+        assert_eq!(
+            conv_module(&n, init).as_deref(),
+            Some("flow.flows.6.enc.in_layers.0")
+        );
+        // Wrapper prefix on the parameters, path without it.
+        let n = node(
+            "Conv",
+            "/enc_p/proj/Conv",
+            &["x", "model_g.enc_p.proj.weight", "model_g.enc_p.proj.bias"],
+            &["y"],
+        );
+        assert_eq!(conv_module(&n, init).as_deref(), Some("enc_p.proj"));
+        // Everything anonymous: the node path.
+        let n = node(
+            "Conv",
+            "/dec/resblocks.3/convs1.1/Conv",
+            &["x", "onnx::Conv_1", "onnx::Conv_2"],
+            &["y"],
+        );
+        assert_eq!(
+            conv_module(&n, init).as_deref(),
+            Some("dec.resblocks.3.convs1.1")
+        );
+        let n = node("Conv", "Conv_7", &["x", "onnx::Conv_1"], &["y"]);
+        assert_eq!(conv_module(&n, init), None);
+    }
+
+    #[test]
+    fn conv_attributes_are_validated() {
+        let mut n = node("ConvTranspose", "/dec/ups.0/ConvTranspose", &[], &[]);
+        let a = conv_attrs(&n).unwrap();
+        assert_eq!((a.dilation, a.stride, a.pad), (1, 1, 0));
+        for (attr, v, ok) in [
+            ("strides", 8, true),
+            ("strides", 0, false),
+            ("dilations", -3, false),
+            ("pads", -1, false),
+            ("pads", 0, true),
+        ] {
+            n.attributes = vec![onnx::Attribute {
+                name: attr.into(),
+                value: onnx::AttrValue::Ints(vec![v, v]),
+            }];
+            assert_eq!(conv_attrs(&n).is_ok(), ok, "{attr} {v}");
+        }
+    }
+
+    #[test]
+    fn duration_predictor_scale_in_every_export_layout() {
+        let want = [(0.5f32).exp(), (-1.0f32).exp()];
+        let sub = |m: &str| node("Sub", "Sub_1", &["z", m], &["d"]);
+        // Exp of a constant holding -logs (most exports, any node naming).
+        let model = onnx::Model {
+            nodes: vec![
+                sub("dp.flows.0.m"),
+                node("Exp", "Exp_5158", &["onnx::Exp_8613"], &["e"]),
+                node("Mul", "Mul_5159", &["d", "e"], &["out"]),
+            ],
+            initializers: vec![
+                tensor("dp.flows.0.m", &[2, 1], &[0.0, 0.0]),
+                tensor("onnx::Exp_8613", &[2, 1], &[0.5, -1.0]),
+            ],
+            ..Default::default()
+        };
+        let init = |m: &onnx::Model| -> HashMap<String, onnx::Tensor> {
+            m.initializers
+                .iter()
+                .map(|t| (t.name.clone(), t.clone()))
+                .collect()
+        };
+        let check = |model: &onnx::Model| {
+            let owned = init(model);
+            let map: HashMap<&str, &onnx::Tensor> =
+                owned.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            dp_affine_scale(model, &map)
+        };
+        assert_eq!(check(&model).unwrap(), (vec![2, 1], want.to_vec()));
+        // Folded into the Mul's constant operand, wrapper prefix on m.
+        let model = onnx::Model {
+            nodes: vec![
+                sub("model_g.dp.flows.0.m"),
+                node("Mul", "/dp/flows.0/Mul", &["d", "onnx::Mul_7227"], &["out"]),
+            ],
+            initializers: vec![
+                tensor("model_g.dp.flows.0.m", &[2, 1], &[0.0, 0.0]),
+                tensor("onnx::Mul_7227", &[2, 1], &want),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(check(&model).unwrap().1, want.to_vec());
+        // Stored logs only.
+        let model = onnx::Model {
+            initializers: vec![tensor("dp.flows.0.logs", &[2, 1], &[-0.5, 1.0])],
+            ..Default::default()
+        };
+        assert_eq!(check(&model).unwrap().1, want.to_vec());
+        assert!(check(&onnx::Model::default()).is_err());
+    }
+
+    #[test]
+    fn malformed_shapes_are_errors() {
+        let mut t = Tensors {
+            map: BTreeMap::new(),
+            attrs: HashMap::new(),
+        };
+        let put = |t: &mut Tensors, name: &str, shape: &[usize]| {
+            let n = shape.iter().product();
+            t.map.insert(name.into(), (shape.to_vec(), vec![0.0; n]));
+        };
+        let msg = |t: &Tensors| t.infer_config().err().unwrap().0;
+        put(&mut t, "enc_p.emb.weight", &[100, 192]);
+        put(&mut t, "enc_p.encoder.attn_layers.0.emb_rel_k", &[1, 9, 96]);
+        // A valid embedding gets past the checks to the next tensor.
+        assert!(msg(&t).contains("missing tensor enc_p.encoder.ffn_layers.0"));
+        for (rel, why) in [
+            (&[1, 0, 0][..], "non-zero"),
+            (&[9, 96], "expected 3"),
+            (&[1, 9, 7], "unsupported relative"),
+            (&[1, 8, 96], "unsupported relative"),
+        ] {
+            put(&mut t, "enc_p.encoder.attn_layers.0.emb_rel_k", rel);
+            assert!(msg(&t).contains(why), "{rel:?}: {}", msg(&t));
+        }
+        put(&mut t, "enc_p.emb.weight", &[100]);
+        assert!(msg(&t).contains("expected 2"));
+    }
+
+    #[test]
+    fn durations_are_bounded() {
+        assert_eq!(
+            frame_durations(&[0.0, 1.0f32.ln(), 2.5f32.ln(), -30.0], 1.0, 100).unwrap(),
+            vec![1, 1, 3, 1]
+        );
+        assert_eq!(frame_durations(&[], 1.0, 0).unwrap(), Vec::<usize>::new());
+        assert_eq!(frame_durations(&[0.0; 4], 2.0, 8).unwrap(), vec![2; 4]);
+        assert!(frame_durations(&[0.0; 4], 2.0, 7).is_err());
+        assert!(frame_durations(&[100.0], 1.0, usize::MAX / 2).is_err());
+        assert!(frame_durations(&[0.0], 1e30, 1 << 20).is_err());
+        assert!(frame_durations(&[f32::NAN], 1.0, 1 << 20).is_err());
+        assert!(frame_durations(&[f32::INFINITY], 1.0, 1 << 20).is_err());
     }
 }

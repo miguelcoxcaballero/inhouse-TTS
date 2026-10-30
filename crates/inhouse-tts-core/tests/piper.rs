@@ -1,9 +1,10 @@
 //! Piper voices against onnxruntime reference outputs.
 //!
 //! Needs the research test data: set `IHTTS_PIPER_TESTDATA` to the folder
-//! holding `dl/*.onnx(.json)` and `out/testvec_*/*.npy` (inputs, ORT
+//! holding `dl*/*.onnx(.json)` and `out/testvec_*/*.npy` (inputs, ORT
 //! waveforms and durations written by `piper_ref.py` / `realvec.py`).
-//! Without it the test only prints a note.
+//! Without it the test only prints a note; missing voices or vectors are
+//! skipped with a note.
 
 use inhouse_tts_core::model::piper::{self, Piper, PiperOptions};
 use inhouse_tts_core::{DType, WeightFile};
@@ -67,12 +68,17 @@ fn diff(a: &[f32], b: &[f32]) -> (f64, f64) {
     (max, 10.0 * (sig / err.max(1e-30)).log10())
 }
 
+/// Folder holding `{voice}.onnx`: `dl` (research voices), `dl2` (extra
+/// low voice) or `dl3` (one voice per export layout).
+fn voice_dir(root: &Path, voice: &str) -> Option<PathBuf> {
+    ["dl", "dl2", "dl3"]
+        .iter()
+        .map(|d| root.join(d))
+        .find(|d| d.join(format!("{voice}.onnx")).exists())
+}
+
 fn load(root: &Path, voice: &str, dtype: DType) -> Piper {
-    let dir = if root.join("dl").join(format!("{voice}.onnx")).exists() {
-        root.join("dl")
-    } else {
-        root.join("dl2")
-    };
+    let dir = voice_dir(root, voice).unwrap();
     let onnx = std::fs::read(dir.join(format!("{voice}.onnx"))).unwrap();
     let json = std::fs::read(dir.join(format!("{voice}.onnx.json"))).unwrap();
     let t = Instant::now();
@@ -126,8 +132,24 @@ fn matches_onnxruntime() {
         ),
         ("es_ES-carlfm-x_low", &[("testvec_carlfm_xlow", 0)]),
         ("es_ES-mls_10246-low", &[("testvec_mls10246_low", 0)]),
+        // Export layouts other than the research voices': `Exp` of the
+        // -logs constant (pytorch 1.13), no module paths and anonymous
+        // flow weights (pytorch 1.11, single and multi-speaker), a
+        // `model_g.` prefix, and residual block type 1 ("high").
+        ("cs_CZ-kasandra-medium", &[("testvec_kasandra_exp", 0)]),
+        ("es_MX-claude-high", &[("testvec_claude_high_pt111", 0)]),
+        ("de_DE-mls-medium", &[("testvec_demls_pt111_sid3", 3)]),
+        (
+            "ku_TR-berfin_renas-medium",
+            &[("testvec_berfin_prefix_sid1", 1)],
+        ),
+        ("es_AR-daniela-high", &[("testvec_daniela_high", 0)]),
     ];
     for (voice, vecs) in cases {
+        if voice_dir(&root, voice).is_none() {
+            println!("{voice}: missing, skipped");
+            continue;
+        }
         let m = load(&root, voice, DType::F32);
         for (vec, speaker) in *vecs {
             let dir = root.join("out").join(vec);
@@ -179,4 +201,73 @@ fn compact_storage_snr() {
         let min_snr = if dtype == DType::F16 { 40.0 } else { 25.0 };
         assert!(snr > min_snr, "{dtype:?}: SNR {snr:.1} dB");
     }
+}
+
+/// f16 storage on long inputs: a duration close to a whole frame can move
+/// by one frame (documented on `piper::convert`); never more than that.
+#[test]
+fn f16_durations_on_long_inputs() {
+    let Some(root) = root() else { return };
+    for (voice, vec, speaker) in [
+        ("es_ES-sharvard-medium", "testvec_sharvard_long_s1", 1),
+        ("es_ES-carlfm-x_low", "testvec_carlfm_long", 0),
+    ] {
+        let dir = root.join("out").join(vec);
+        if !dir.exists() {
+            println!("{vec}: missing, skipped");
+            continue;
+        }
+        let m = load(&root, voice, DType::F16);
+        let (_, durations, _) = run(&m, &dir, speaker);
+        let want: Vec<usize> = npy(&dir.join("durations_ort.npy"))
+            .1
+            .iter()
+            .map(|&v| v as usize)
+            .collect();
+        assert_eq!(durations.len(), want.len());
+        let moved = durations.iter().zip(&want).filter(|(a, b)| a != b).count();
+        println!("{vec} f16: {moved} of {} durations moved", want.len());
+        assert!(durations
+            .iter()
+            .zip(&want)
+            .all(|(&a, &b)| a.abs_diff(b) <= 1));
+        assert!(moved * 200 <= want.len(), "{vec}: {moved} durations moved");
+    }
+}
+
+/// Extreme or invalid options return `Err` instead of aborting on a huge
+/// allocation.
+#[test]
+fn extreme_options_are_errors() {
+    let Some(root) = root() else { return };
+    let m = load(&root, "es_ES-davefx-medium", DType::F16);
+    let ids = [
+        1, 0, 14, 0, 24, 0, 27, 0, 31, 0, 3, 0, 23, 0, 120, 0, 18, 0, 2,
+    ];
+    let opts = |noise_w: f32, length_scale: f32| PiperOptions {
+        noise_scale: 0.667,
+        length_scale,
+        noise_w,
+        seed: 1,
+    };
+    let out = m.synthesize(&ids, 0, opts(4.0, 1.0)).unwrap();
+    assert!(out.audio.iter().all(|v| v.is_finite()));
+    for (noise_w, length_scale) in [
+        (6.0, 1.0),
+        (8.0, 1.0),
+        (20.0, 1.0),
+        (100.0, 1.0),
+        (0.8, 1e30),
+        (0.8, 0.0),
+        (0.8, -1.0),
+        (f32::NAN, 1.0),
+        (0.8, f32::NAN),
+        (f32::INFINITY, 1.0),
+    ] {
+        let r = m.synthesize(&ids, 0, opts(noise_w, length_scale));
+        assert!(r.is_err(), "noise_w {noise_w}, length_scale {length_scale}");
+    }
+    let mut nan = opts(0.8, 1.0);
+    nan.noise_scale = f32::NAN;
+    assert!(m.synthesize(&ids, 0, nan).is_err());
 }

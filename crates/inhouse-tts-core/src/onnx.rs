@@ -183,7 +183,9 @@ impl Tensor {
             return err(format!("onnx: tensor {name} has negative dims"));
         }
         let dims: Vec<usize> = dims.into_iter().map(|d| d as usize).collect();
-        let numel: usize = dims.iter().product();
+        let Some(numel) = dims.iter().try_fold(1usize, |n, &d| n.checked_mul(d)) else {
+            return err(format!("onnx: tensor {name} dims {dims:?} overflow"));
+        };
         let data = match dtype {
             FLOAT => TensorData::F32(match raw {
                 Some(b) => b
@@ -323,8 +325,22 @@ impl Node {
 #[derive(Clone, Debug, Default)]
 pub struct Model {
     pub producer: String,
+    /// Names of the graph inputs (initializers excluded where listed).
+    pub inputs: Vec<String>,
     pub initializers: Vec<Tensor>,
     pub nodes: Vec<Node>,
+}
+
+/// Name (field 1) of a `ValueInfoProto`.
+fn value_info_name(buf: &[u8]) -> Result<String> {
+    let mut r = Reader::new(buf);
+    let mut name = String::new();
+    while let Some((field, w)) = r.next()? {
+        if field == 1 {
+            name = string(&w)?;
+        }
+    }
+    Ok(name)
 }
 
 impl Model {
@@ -347,6 +363,7 @@ impl Model {
             match (field, &w) {
                 (1, Wire::Bytes(b)) => m.nodes.push(Node::parse(b)?),
                 (5, Wire::Bytes(b)) => m.initializers.push(Tensor::parse(b)?),
+                (11, Wire::Bytes(b)) => m.inputs.push(value_info_name(b)?),
                 _ => {}
             }
         }
@@ -442,8 +459,12 @@ mod tests {
         bytes(4, b"Conv", &mut node);
         bytes(5, &a1, &mut node);
         bytes(5, &a2, &mut node);
+        let mut input = Vec::new();
+        bytes(1, b"x", &mut input);
+        bytes(2, &[8, 1], &mut input);
         let mut graph = Vec::new();
         bytes(1, &node, &mut graph);
+        bytes(11, &input, &mut graph);
         bytes(2, b"g", &mut graph);
         for t in [&t1, &t2, &t3, &t4] {
             bytes(5, t, &mut graph);
@@ -455,6 +476,7 @@ mod tests {
 
         let m = Model::parse(&model).unwrap();
         assert_eq!(m.producer, "pytorch");
+        assert_eq!(m.inputs, vec!["x"]);
         assert_eq!(m.initializers.len(), 4);
         let w = &m.initializers[0];
         assert_eq!((w.name.as_str(), w.dims.clone()), ("w", vec![2, 3]));
