@@ -7353,6 +7353,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "inhouse-tts-core",
+ "inhouse-tts-text",
  "serde_json",
 ]
 
