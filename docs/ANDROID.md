@@ -56,7 +56,12 @@ class InhouseTts(model: ByteArray, voices: ByteArray, gpu: Boolean = true) : Aut
 
     fun phonemize(text: String, locale: String): String = nativePhonemize(handle, text, locale)
 
-    /** Añade una voz Piper (.ihw); las de varios hablantes añaden "nombre-<hablante>". */
+    /**
+     * Añade una voz Piper (.ihw). [name] es el nombre del fichero, con o sin
+     * la calidad: "es_ES-davefx-medium" y "es_ES-davefx" dan la voz
+     * "es_ES-davefx". Las de varios hablantes añaden "nombre-<hablante>"
+     * ("es_ES-sharvard-F", "es_ES-sharvard-M").
+     */
     fun addPiper(name: String, model: ByteArray) = nativeAddPiper(handle, name, model)
 
     override fun close() { if (handle != 0L) { nativeDestroy(handle); handle = 0L } }
@@ -100,6 +105,8 @@ thread {
 ```c
 void*  ihtts_engine_new(const uint8_t* model, size_t model_len, const uint8_t* voices, size_t voices_len);
 void*  ihtts_engine_new_gpu(const uint8_t* model, size_t model_len, const uint8_t* voices, size_t voices_len);
+// model NULL o de longitud 0: motor solo para voces Piper (el paquete de voces se ignora).
+int    ihtts_add_piper(void* engine, const char* name, const uint8_t* model, size_t model_len); // 0 = ok
 size_t ihtts_accelerator(const void* engine, char* buf, size_t len);  // "CPU" o "GPU <nombre>"
 float* ihtts_speak(void* engine, const char* text, const char* locale, const char* voice, float speed, size_t* out_len);
 void   ihtts_audio_free(float* samples, size_t len);
@@ -107,7 +114,17 @@ void   ihtts_engine_free(void* engine);
 uint32_t ihtts_sample_rate(void);
 ```
 
+Ejemplo solo con voces en español, sin el modelo K82:
+
+```kotlin
+val tts = InhouseTts(ByteArray(0), ByteArray(0), gpu = false)
+tts.addPiper("es_ES-sharvard-medium", assets.open("es_ES-sharvard-medium.ihw").readBytes())
+val pcm = tts.speak("La zeta de Zaragoza.", "es-ES")   // voz por defecto del acento: es_ES-sharvard-F
+```
+
 ## 6. Rendimiento esperado
+
+Las voces Piper cuestan ~5,6 GFLOP por segundo de audio (la voz *high* de Daniela, unas 4 veces más) y van en la CPU. En un PC de 4 núcleos son 20 veces más rápidas que el tiempo real, y en un móvil moderno se espera RTF < 0,2.
 
 Con `gpu = true`, el decodificador y el vocoder, el 95 % del cómputo, van en la GPU del móvil a través de Vulkan (`wgpu`). Si no hay un driver Vulkan con *compute* utilizable, se usa la CPU (NEON). El backend de GPU da la misma salida que la CPU (101–104 dB de SNR en nuestras pruebas), pero aún no se ha medido en teléfonos reales.
 

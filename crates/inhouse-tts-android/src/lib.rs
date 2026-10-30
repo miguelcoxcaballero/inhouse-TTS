@@ -53,14 +53,15 @@ fn load(model: &[u8], gpu: bool) -> Result<Engine, String> {
     Engine::new(model, LoadOptions::default()).map_err(|e| e.0)
 }
 
-fn options(locale: &str, voice: &str, speed: f32) -> SpeakOptions {
+/// An empty `voice` picks the best loaded voice of the locale.
+fn options(engine: &Engine, locale: &str, voice: &str, speed: f32) -> SpeakOptions {
     let loc = inhouse_tts::text::find_locale(locale);
     SpeakOptions {
         locale: loc.map_or(locale.to_string(), |l| l.code.to_string()),
         voice: if voice.is_empty() {
-            loc.and_then(|l| l.voices.first())
-                .unwrap_or(&"af_heart")
-                .to_string()
+            engine
+                .default_voice(locale)
+                .unwrap_or_else(|| "af_heart".to_string())
         } else {
             voice.to_string()
         },
@@ -208,13 +209,16 @@ pub unsafe extern "system" fn Java_com_inhouse_tts_InhouseTts_nativeSpeak(
         throw(env, "engine is closed");
         return std::ptr::null_mut();
     };
-    let opts = options(&string(env, locale), &string(env, voice), speed);
+    let (locale, voice) = (string(env, locale), string(env, voice));
     let text = string(env, text);
     let result = h
         .engine
         .lock()
         .map_err(|_| "engine poisoned".to_string())
-        .and_then(|mut e| e.speak(&text, &opts).map_err(|e| e.0));
+        .and_then(|mut e| {
+            let opts = options(&e, &locale, &voice, speed);
+            e.speak(&text, &opts).map_err(|e| e.0)
+        });
     match result {
         Ok(audio) => floats(env, &audio),
         Err(e) => {
@@ -249,12 +253,13 @@ pub unsafe extern "system" fn Java_com_inhouse_tts_InhouseTts_nativeStream(
     if method.is_null() {
         return; // NoSuchMethodError is pending in Java.
     }
-    let opts = options(&string(env, locale), &string(env, voice), speed);
+    let (locale, voice) = (string(env, locale), string(env, voice));
     let text = string(env, text);
     let Ok(mut engine) = h.engine.lock() else {
         throw(env, "engine poisoned");
         return;
     };
+    let opts = options(&engine, &locale, &voice, speed);
     let stream = match engine.stream(&text, &opts) {
         Ok(s) => s,
         Err(e) => {
@@ -429,10 +434,10 @@ pub unsafe extern "C" fn ihtts_speak(
             CStr::from_ptr(p).to_string_lossy().into_owned()
         }
     };
-    let opts = options(&s(locale), &s(voice), speed);
     let Ok(mut e) = h.engine.lock() else {
         return std::ptr::null_mut();
     };
+    let opts = options(&e, &s(locale), &s(voice), speed);
     match e.speak(&s(text), &opts) {
         Ok(audio) => {
             let mut b = audio.into_boxed_slice();

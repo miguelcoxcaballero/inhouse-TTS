@@ -70,23 +70,12 @@ fn die(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1)
 }
 
-/// Voice name of a Piper file: `es_ES-davefx-medium.ihw` → `es_ES-davefx`.
-fn piper_name(path: &std::path::Path) -> String {
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    ["-x_low", "-low", "-medium", "-high"]
-        .iter()
-        .find_map(|q| stem.strip_suffix(q))
-        .unwrap_or(&stem)
-        .to_string()
-}
-
 /// Loads the K82 model and voice pack when present (English voices) and
 /// every Piper voice in the Piper directory. A missing K82 model is fine
 /// when Piper voices are available.
 fn load_engine(args: &[String]) -> Engine {
-    let model = arg(args, "--model")
-        .or_else(|| std::env::var("INHOUSE_TTS_MODEL").ok())
-        .unwrap_or_else(|| "models/k82.ihw".into());
+    let explicit = arg(args, "--model").or_else(|| std::env::var("INHOUSE_TTS_MODEL").ok());
+    let model = explicit.clone().unwrap_or_else(|| "models/k82.ihw".into());
     let voices = arg(args, "--voices")
         .or_else(|| std::env::var("INHOUSE_TTS_VOICES").ok())
         .unwrap_or_else(|| "models/voices.ihw".into());
@@ -109,7 +98,11 @@ fn load_engine(args: &[String]) -> Engine {
             e.add_voices(&vb).unwrap_or_else(|e| die(e));
             e
         }
-        Err(_) => Engine::without_model(),
+        // Only the default location may be missing (Piper-only setup).
+        Err(e) if explicit.is_none() && e.kind() == std::io::ErrorKind::NotFound => {
+            Engine::without_model()
+        }
+        Err(e) => die(format!("cannot read model {model}: {e}")),
     };
     let mut files: Vec<_> = std::fs::read_dir(&piper)
         .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -119,7 +112,7 @@ fn load_engine(args: &[String]) -> Engine {
     for f in &files {
         let bytes = std::fs::read(f).unwrap_or_else(|e| die(format!("{}: {e}", f.display())));
         engine
-            .add_piper(&piper_name(f), &bytes)
+            .add_piper(&f.file_stem().unwrap_or_default().to_string_lossy(), &bytes)
             .unwrap_or_else(|e| die(format!("{}: {e}", f.display())));
     }
     if !engine.has_model() && files.is_empty() {
@@ -152,7 +145,8 @@ fn speak_options(args: &[String]) -> SpeakOptions {
         .unwrap_or_else(|| die(format!("unsupported locale {locale}")));
     SpeakOptions {
         locale: loc.code.to_string(),
-        voice: opt(args, "--voice", "-v").unwrap_or_else(|| loc.voices[0].to_string()),
+        // Empty: the best loaded voice of the locale (see `with_voice`).
+        voice: opt(args, "--voice", "-v").unwrap_or_default(),
         speed: opt(args, "--speed", "-s")
             .map(|s| s.parse().unwrap_or_else(|_| die("bad speed")))
             .unwrap_or(1.0),
@@ -161,6 +155,16 @@ fn speak_options(args: &[String]) -> SpeakOptions {
             .unwrap_or(1),
         ..Default::default()
     }
+}
+
+/// Fills in the default voice of the locale once the engine is loaded.
+fn with_voice(mut opts: SpeakOptions, engine: &Engine) -> SpeakOptions {
+    if opts.voice.is_empty() {
+        opts.voice = engine
+            .default_voice(&opts.locale)
+            .unwrap_or_else(|| die(format!("no voice for {}", opts.locale)));
+    }
+    opts
 }
 
 fn text_arg(args: &[String]) -> String {
@@ -196,6 +200,7 @@ fn main() {
             let out = opt(&args, "--out", "-o").unwrap_or_else(|| "out.wav".into());
             let t0 = Instant::now();
             let mut engine = load_engine(&args);
+            let opts = with_voice(opts, &engine);
             let load = t0.elapsed();
             let t1 = Instant::now();
             let stream = args.iter().any(|a| a == "--stream");
@@ -260,6 +265,7 @@ fn main() {
                     .unwrap_or_default()
             });
             let mut engine = load_engine(&args);
+            let opts = with_voice(opts, &engine);
             let _ = engine.speak(
                 "Warm up.",
                 &SpeakOptions {

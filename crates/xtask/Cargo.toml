@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 inhouse-tts-core = { workspace = true, features = ["parallel", "convert"] }
 serde_json.workspace = true
+inhouse-tts-text = { workspace = true, default-features = false }

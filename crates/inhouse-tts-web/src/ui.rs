@@ -80,6 +80,10 @@ struct App {
     all_audio: Vec<f32>,
     t_start: f64,
     t_first: Option<f64>,
+    /// Models (Piper files, "k82") already in the cache and loaded by
+    /// worker 0. Until then only worker 0 gets jobs that need them, so the
+    /// workers don't all download the same model at once.
+    loaded: HashSet<String>,
 }
 
 thread_local! {
@@ -215,6 +219,7 @@ pub fn start() -> Result<(), JsValue> {
         all_audio: Vec::new(),
         t_start: 0.0,
         t_first: None,
+        loaded: HashSet::new(),
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(|a| a.locale_changed());
@@ -387,9 +392,18 @@ impl App {
         // Only voices made for this language: no voice speaks a language
         // it was not trained on.
         let native: Vec<&str> = loc.voices.iter().copied().filter(|v| has(v)).collect();
+        if native.is_empty() {
+            // This build has no voice for the accent.
+            self.ui.speak.set_disabled(true);
+            self.set_status(self.s.no_voice);
+            return;
+        }
+        let first = native[0];
         let _ = add_group(self.s.native_voices, native);
-        if let Some(first) = loc.voices.first() {
-            self.ui.voice.set_value(first);
+        self.ui.voice.set_value(first);
+        if self.slots.first().is_some_and(|s| s.ready) {
+            self.ui.speak.set_disabled(false);
+            self.set_status(self.s.ready);
         }
     }
 
@@ -440,6 +454,7 @@ impl App {
             s.worker.terminate();
         }
         self.gpu = Gpu::Unknown;
+        self.loaded.clear();
         self.ui.speak.set_disabled(true);
         self.set_status(self.s.preparing);
         self.ensure_workers();
@@ -476,6 +491,8 @@ impl App {
             "booted" => self.init_worker(index),
             "progress" => {
                 let (l, t) = (get_f64(&d, "loaded"), get_f64(&d, "total").max(1.0));
+                let shown = if l < t { "block" } else { "none" };
+                let _ = self.ui.bar_wrap.style().set_property("display", shown);
                 let _ = self
                     .ui
                     .bar
@@ -499,13 +516,21 @@ impl App {
                     let _ = self.ui.bar_wrap.style().set_property("display", "none");
                     self.ui.speak.set_disabled(false);
                     self.set_status(self.s.ready);
+                    // Models load on first use; "loaded" reports the GPU.
+                    self.gpu = Gpu::Off;
+                    set_text(
+                        &self.ui.metrics,
+                        &format!("CPU · {}", get_str(&d, "kernel")),
+                    );
+                    self.ensure_workers();
+                }
+                self.dispatch();
+            }
+            "loaded" => {
+                self.loaded.insert(get_str(&d, "model"));
+                if index == 0 && get_str(&d, "model") == "k82" {
                     let gpu = get_str(&d, "gpu");
                     let gpu_error = get_str(&d, "gpu_error");
-                    self.gpu = if gpu.is_empty() {
-                        Gpu::Off
-                    } else {
-                        Gpu::On(gpu.clone())
-                    };
                     let device = if gpu.is_empty() {
                         let mut t = format!("CPU · {}", get_str(&d, "kernel"));
                         if !gpu_error.is_empty() {
@@ -515,18 +540,17 @@ impl App {
                             }
                         }
                         t
-                    } else if gpu == "WebGPU" {
-                        gpu
                     } else {
-                        format!("WebGPU · {gpu}")
+                        self.gpu = Gpu::On(gpu.clone());
+                        if gpu == "WebGPU" {
+                            gpu
+                        } else {
+                            format!("WebGPU · {gpu}")
+                        }
                     };
                     set_text(
                         &self.ui.metrics,
-                        &format!(
-                            "{device} · {:.1} s + {:.1} s",
-                            get_f64(&d, "download_ms") / 1e3,
-                            (get_f64(&d, "parse_ms") + get_f64(&d, "gpu_ms")) / 1e3
-                        ),
+                        &format!("{device} · {:.1} s", get_f64(&d, "ms") / 1e3),
                     );
                     self.ensure_workers();
                 }
@@ -603,9 +627,25 @@ impl App {
         Ok(())
     }
 
+    /// Model a voice needs: its Piper file, or "k82" for English voices.
+    fn model_key(&self, voice: &str) -> String {
+        if let Ok(models) = get(&self.manifest, "piper").dyn_into::<Array>() {
+            for m in models.iter() {
+                let has = get(&m, "voices")
+                    .dyn_into::<Array>()
+                    .is_ok_and(|vs| vs.iter().any(|v| v.as_string().as_deref() == Some(voice)));
+                if has {
+                    return get_str(&m, "file");
+                }
+            }
+        }
+        "k82".into()
+    }
+
     fn dispatch(&mut self) {
+        let first_only = !self.loaded.contains(&self.model_key(&self.voice));
         for i in 0..self.slots.len() {
-            if !self.slots[i].ready || self.slots[i].busy {
+            if !self.slots[i].ready || self.slots[i].busy || (first_only && i > 0) {
                 continue;
             }
             let Some((index, ps)) = self.queue.pop_front() else {

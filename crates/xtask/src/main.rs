@@ -223,6 +223,22 @@ fn web(args: &[String]) {
             }));
         }
     }
+    // Every accent needs at least one of its voices in the site.
+    let shipped: Vec<String> = names
+        .iter()
+        .cloned()
+        .chain(
+            piper
+                .iter()
+                .flat_map(|p| p["voices"].as_array().cloned().unwrap_or_default())
+                .filter_map(|v| v.as_str().map(String::from)),
+        )
+        .collect();
+    for l in inhouse_tts_text::LOCALES {
+        if !l.voices.iter().any(|v| shipped.iter().any(|s| s == v)) {
+            println!("warning: no voice for {} ({})", l.code, l.voices.join(", "));
+        }
+    }
     let manifest = serde_json::json!({
         "version": format!("{version:016x}"),
         "model": { "files": files, "bytes": model.len(), "dtype": "q8" },

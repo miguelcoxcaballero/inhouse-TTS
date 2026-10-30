@@ -28,8 +28,8 @@ struct State {
     /// "auto", "force" or "off" (K82 decoder on WebGPU).
     gpu: String,
     report: bool,
-    /// Piper voice name → model file.
-    piper: Vec<(String, String)>,
+    /// Piper voice name → model file and its size.
+    piper: Vec<(String, String, usize)>,
     inbox: VecDeque<JsValue>,
     running: bool,
 }
@@ -88,9 +88,10 @@ async fn init(d: JsValue) -> Result<(), JsValue> {
     if let Ok(models) = get(&d, "piper").dyn_into::<Array>() {
         for m in models.iter() {
             let file = get_str(&m, "file");
+            let bytes = get_f64(&m, "bytes") as usize;
             if let Ok(vs) = get(&m, "voices").dyn_into::<Array>() {
                 for v in vs.iter().filter_map(|v| v.as_string()) {
-                    piper.push((v, file.clone()));
+                    piper.push((v, file.clone(), bytes));
                 }
             }
         }
@@ -155,6 +156,19 @@ async fn download(
     Ok(bytes)
 }
 
+/// Tells the page that a model is loaded (`model`: a Piper file or "k82"),
+/// with the GPU outcome for K82, so it can spread work over the workers.
+fn post_loaded(model: &str, ms: f64, gpu: &str, gpu_error: &str) {
+    post(&obj(&[
+        ("type", "loaded".into()),
+        ("model", model.into()),
+        ("ms", ms.into()),
+        ("kernel", inhouse_tts::core::gemm::kernel().name.into()),
+        ("gpu", gpu.into()),
+        ("gpu_error", gpu_error.into()),
+    ]));
+}
+
 /// Loads the K82 model (English voices) and, if requested, its GPU decoder.
 async fn ensure_k82(e: &mut Engine) -> Result<(), JsValue> {
     if e.has_model() {
@@ -171,6 +185,7 @@ async fn ensure_k82(e: &mut Engine) -> Result<(), JsValue> {
             s.report,
         )
     });
+    let t0 = now();
     let bytes = download(&base, &cache, &files, total, report).await?;
     let use_gpu = matches!(gpu.as_str(), "auto" | "force");
     e.load_model(
@@ -182,16 +197,19 @@ async fn ensure_k82(e: &mut Engine) -> Result<(), JsValue> {
     )
     .map_err(|e| err(e.0))?;
     drop(bytes);
+    let (mut gpu_name, mut gpu_error) = (String::new(), String::new());
     if use_gpu {
-        if let Err(g) = e
+        match e
             .enable_gpu(GpuOptions {
                 allow_software: gpu == "force",
             })
             .await
         {
-            web_sys::console::info_1(&format!("WebGPU: {}", g.0).into());
+            Ok(n) => gpu_name = n,
+            Err(g) => gpu_error = g.0,
         }
     }
+    post_loaded("k82", now() - t0, &gpu_name, &gpu_error);
     Ok(())
 }
 
@@ -240,18 +258,16 @@ async fn run(
         if e.voices().any(|v| v == name) {
             continue;
         }
-        if let Some((_, file)) = piper.iter().find(|(v, _)| *v == name) {
-            let bytes = download(base, cache, std::slice::from_ref(file), 0, report).await?;
-            let model = file
+        if let Some((_, file, size)) = piper.iter().find(|(v, _, _)| *v == name) {
+            let t0 = now();
+            let bytes = download(base, cache, std::slice::from_ref(file), *size, report).await?;
+            let stem = file
                 .rsplit('/')
                 .next()
                 .unwrap_or(file)
                 .trim_end_matches(".ihw");
-            let model = ["-x_low", "-low", "-medium", "-high"]
-                .iter()
-                .find_map(|q| model.strip_suffix(q))
-                .unwrap_or(model);
-            e.add_piper(model, &bytes).map_err(|e| err(e.0))?;
+            e.add_piper(stem, &bytes).map_err(|e| err(e.0))?;
+            post_loaded(file, now() - t0, "", "");
         } else {
             ensure_k82(e).await?;
             let bytes = fetch_bytes(&format!("{base}/voices/{name}.ihw"), cache, |_| {}).await?;

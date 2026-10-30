@@ -136,6 +136,14 @@ pub struct VoiceInfo {
     pub label: String,
 }
 
+/// Voice name of a Piper model: the file stem without its quality suffix.
+pub fn piper_voice_name(stem: &str) -> &str {
+    ["-x_low", "-low", "-medium", "-high"]
+        .iter()
+        .find_map(|q| stem.strip_suffix(q))
+        .unwrap_or(stem)
+}
+
 /// Piper voices shipped with Inhouse TTS: name prefix and whether the
 /// speaker is a woman.
 const PIPER_GENDER: &[(&str, bool)] = &[
@@ -287,10 +295,12 @@ impl Engine {
         Ok(())
     }
 
-    /// Adds a Piper voice (`.ihw` written by `piper::convert`) under `name`;
+    /// Adds a Piper voice (`.ihw` written by `piper::convert`) under `name`,
+    /// without a quality suffix (`es_ES-davefx-medium` → `es_ES-davefx`);
     /// multi-speaker models add one voice per speaker, `name-<speaker>`.
     /// Returns the voice names.
     pub fn add_piper(&mut self, name: &str, bytes: &[u8]) -> Result<Vec<String>> {
+        let name = piper_voice_name(name);
         let prepack = !cfg!(target_arch = "wasm32");
         let model = Arc::new(Piper::load(WeightFile::parse(bytes)?, prepack)?);
         let speakers: Vec<(String, usize)> = if model.speakers().is_empty() {
@@ -364,6 +374,28 @@ impl Engine {
 
     pub fn voices(&self) -> impl Iterator<Item = &str> {
         self.voices.keys().map(String::as_str)
+    }
+
+    /// The best loaded voice for a locale: the first of its recommended
+    /// voices that is loaded (or the first recommended one if none is).
+    pub fn default_voice(&self, locale: &str) -> Option<String> {
+        let loc = inhouse_tts_text::find_locale(locale)?;
+        loc.voices
+            .iter()
+            .find(|v| self.voices.contains_key(**v))
+            .or(loc.voices.first())
+            .map(|v| v.to_string())
+    }
+
+    /// Fails when a K82 voice is used without the K82 model.
+    fn check_model(&self, voice: &Voice) -> Result<()> {
+        if voice.style(0).is_some() && self.model.is_none() {
+            return Err(Error(format!(
+                "voice {} needs the K82 model, which is not loaded",
+                voice.name
+            )));
+        }
+        Ok(())
     }
 
     pub fn frontend(&mut self) -> &mut Frontend {
@@ -534,12 +566,10 @@ impl Engine {
         voice: &Voice,
         opts: &SpeakOptions,
     ) -> Result<Vec<f32>> {
-        let Some(model) = &self.model else {
+        self.check_model(voice)?;
+        let (Some(model), Some(_)) = (&self.model, voice.style(0)) else {
             return Ok(self.synth_phonemes(phonemes, voice, opts));
         };
-        if voice.style(0).is_none() {
-            return Ok(self.synth_phonemes(phonemes, voice, opts));
-        }
         let ids = Self::ids(model, phonemes);
         let style = voice.style(ids.len() - 2).unwrap_or_default();
         let inp = model.prepare(&ids, style, infer_options(opts));
@@ -565,8 +595,9 @@ impl Engine {
         text: &str,
         opts: &SpeakOptions,
     ) -> Result<impl Iterator<Item = Result<Chunk>> + '_> {
-        let chunks = self.plan(text, opts)?;
         let voice = self.resolve_voice(&opts.voice)?;
+        self.check_model(&voice)?;
+        let chunks = self.plan(text, opts)?;
         let opts = opts.clone();
         Ok(chunks
             .into_iter()
