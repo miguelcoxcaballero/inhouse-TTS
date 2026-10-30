@@ -164,6 +164,14 @@ fn with_voice(mut opts: SpeakOptions, engine: &Engine) -> SpeakOptions {
             .default_voice(&opts.locale)
             .unwrap_or_else(|| die(format!("no voice for {}", opts.locale)));
     }
+    if !engine.has_voices(&opts.voice) {
+        let hint = if engine.has_model() {
+            "see `inhouse-tts voices`"
+        } else {
+            "English voices need the K82 model (--model, default models/k82.ihw); Spanish voices go in models/piper"
+        };
+        die(format!("voice {} is not loaded: {hint}", opts.voice));
+    }
     opts
 }
 

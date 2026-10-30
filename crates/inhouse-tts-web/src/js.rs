@@ -108,12 +108,16 @@ pub async fn fetch_bytes(
     if !resp.ok() {
         return Err(err(format!("HTTP {} loading {url}", resp.status())));
     }
-    if let Some(c) = &cache {
-        if let Ok(copy) = resp.clone() {
-            let _ = JsFuture::from(c.put_with_str(url, &copy)).await;
-        }
+    // Store a copy while the body streams in (awaiting the cache first
+    // would buffer the whole file and hide the download progress).
+    let put = cache
+        .as_ref()
+        .and_then(|c| resp.clone().ok().map(|copy| c.put_with_str(url, &copy)));
+    let body = read_body(&resp, progress).await?;
+    if let Some(p) = put {
+        let _ = JsFuture::from(p).await;
     }
-    read_body(&resp, progress).await
+    Ok(body)
 }
 
 /// Fetches a small file bypassing every cache (used for the manifest).

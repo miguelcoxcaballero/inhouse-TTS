@@ -514,8 +514,13 @@ impl App {
                 if index == 0 {
                     let _ = self.ui.bar.style().set_property("width", "100%");
                     let _ = self.ui.bar_wrap.style().set_property("display", "none");
-                    self.ui.speak.set_disabled(false);
-                    self.set_status(self.s.ready);
+                    // Without a voice for the accent Speak stays disabled.
+                    if self.ui.voice.length() > 0 {
+                        self.ui.speak.set_disabled(false);
+                        self.set_status(self.s.ready);
+                    } else {
+                        self.set_status(self.s.no_voice);
+                    }
                     // Models load on first use; "loaded" reports the GPU.
                     self.gpu = Gpu::Off;
                     set_text(

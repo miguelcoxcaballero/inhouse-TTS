@@ -278,6 +278,7 @@ async fn run(
     let t = now();
     let audio = match e.synth_phonemes_async(ps, &v, opts).await {
         Ok(a) => a,
+        Err(e2) if e.gpu_name().is_none() => return Err(err(e2.0)),
         Err(gpu_err) => {
             // The GPU failed (device lost, out of memory…): continue on the CPU.
             e.disable_gpu();
